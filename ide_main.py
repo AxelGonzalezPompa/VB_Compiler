@@ -119,7 +119,7 @@ class IDEVisualBasic:
         keywords = ["Imports", "Module", "Sub", "Main", "End", 
                     "Dim", "As", "Print", "If", "Then", "Select", 
                     "Case", "Is", "To", "Else", "For", "Next",
-                    "Step", "While"]
+                    "Step", "While", "Function", "Return"]
         
         for word in keywords:
             self.aplicar_tag_color(f"\\m{word}\\M", "Keyword", ignorar_tags=["String"])

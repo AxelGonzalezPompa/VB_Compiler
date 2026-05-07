@@ -23,6 +23,8 @@ class TokenType(enum.Enum):
     WHILE = "While"
     AND = "And"
     OR = "Or"
+    FUNCTION = "Function"
+    RETURN = "Return"
     
     TIPO_ENTERO = "Integer"
     TIPO_DOUBLE = "Double"
@@ -98,7 +100,9 @@ class Lexico:
             "step": TokenType.STEP,
             "while": TokenType.WHILE,
             "and": TokenType.AND,
-            "or": TokenType.OR
+            "or": TokenType.OR,
+            "function": TokenType.FUNCTION,
+            "return": TokenType.RETURN
         }
 
         self.op_dobles = {
@@ -232,20 +236,35 @@ class TablaSimbolos:
             scope_cerrado = self.scopes.pop()
             self.historial_scopes.append(scope_cerrado)
 
-    def declarar(self, nombre, tipo):
+    def declarar(self, nombre, tipo, tamano_arreglo=None):
         ambito_actual = self.scopes[-1]
         
         if nombre in ambito_actual:
             return False, ambito_actual[nombre]["tipo"]
         
-        # Cálculo de dirección de memoria como en semantica.py
         direccion = self.direccion_actual
-        ambito_actual[nombre] = {"tipo": tipo, "dir": direccion}
+        tamano_base = self.tamanos.get(tipo, 4) # 4 por defecto si no lo encuentra
         
-        # Incremento de la dirección según el tamaño del tipo
-        tamano = self.tamanos.get(tipo, 4) # 4 por defecto si no lo encuentra
-        self.direccion_actual += tamano
-        
+        # --- Cálculo dinámico de memoria para arreglos ---
+        if tamano_arreglo is not None:
+            # Reservamos memoria para N elementos
+            espacio_total = tamano_base * tamano_arreglo
+            ambito_actual[nombre] = {
+                "tipo": tipo, 
+                "dir": direccion, 
+                "es_arreglo": True, 
+                "limite": tamano_arreglo
+            }
+            self.direccion_actual += espacio_total
+        else:
+            # Variable normal
+            ambito_actual[nombre] = {
+                "tipo": tipo, 
+                "dir": direccion, 
+                "es_arreglo": False
+            }
+            self.direccion_actual += tamano_base
+
         return True, tipo
 
     def existe(self, nombre):
@@ -261,6 +280,19 @@ class TablaSimbolos:
             if nombre in ambito:
                 return ambito[nombre]["tipo"]
         return None
+
+    def declarar_funcion(self, nombre, tipo_retorno, parametros, cuad_inicio):
+        # Las funciones siempre se guardan en el scope global (índice 0)
+        if nombre in self.scopes[0]:
+            return False
+            
+        self.scopes[0][nombre] = {
+            "tipo": tipo_retorno,
+            "es_funcion": True,
+            "parametros": parametros, # Lista de tipos. Ej: ['Integer', 'Integer']
+            "cuad_inicio": cuad_inicio
+        }
+        return True
 
 # --- PARSER ---
 class CompiladorProyecto:
@@ -302,7 +334,9 @@ class CompiladorProyecto:
             TokenType.FOR: self._analizar_for,
             TokenType.NEXT: self._analizar_next,
             TokenType.WHILE: self._analizar_while,
-            TokenType.ELSE: self._analizar_else
+            TokenType.ELSE: self._analizar_else,
+            TokenType.FUNCTION: self._analizar_function,
+            TokenType.RETURN: self._analizar_return
         }
 
     def generar_temporal(self):
@@ -680,6 +714,18 @@ class CompiladorProyecto:
             self.en_sub = False
             self.tabla.salir_ambito()
         
+        elif self.token_actual.type == TokenType.FUNCTION:
+            self.consumir()
+            if estructura_top and estructura_top != "Function":
+                self.registrar_warning(f"Warning scope error: Cannot close 'Function', inside '{estructura_top}'")
+            else:
+                if self.pila_estructuras_abiertas:
+                    self.pila_estructuras_abiertas.pop()
+                self.en_sub = False
+                self.tabla.salir_ambito()
+                # Emitimos el marcador de fin de función
+                self.emitir_cuadruplo('ENDFUNC', '', '', '')
+
         else:
             self.registrar_warning("Warning incomplete 'End' statement")
 
@@ -692,6 +738,22 @@ class CompiladorProyecto:
         if self.token_actual.type == TokenType.IDENTIFICADOR:
             nombre_var = self.token_actual.value
             self.consumir()
+
+            # --- Detectar si es un arreglo Dim arr(10) ---
+            tamano_arreglo = None
+            if self.token_actual.type == TokenType.PAREN_A:
+                self.consumir()
+                if self.token_actual.type == TokenType.NUMERO:
+                    tamano_arreglo = int(self.token_actual.value)
+                    self.consumir()
+                else:
+                    self.registrar_warning("Warning expected array size (number)")
+
+                if self.token_actual.type == TokenType.PAREN_C:
+                    self.consumir()
+                else:
+                    self.registrar_warning("Warning missing ')' in array declaration")
+
             if self.token_actual.type == TokenType.AS:
                 self.consumir()
                 tipos_validos = [TokenType.TIPO_ENTERO, TokenType.TIPO_DOUBLE, TokenType.TIPO_CADENA, TokenType.TIPO_BOOLEANO, TokenType.TIPO_CHAR]
@@ -703,13 +765,17 @@ class CompiladorProyecto:
                     tipo_var_str = self.token_actual.value 
                     self.consumir() 
                 
-                exito, tipo_previo = self.tabla.declarar(nombre_var, tipo_var_str)
+                # Le pasamos el tamaño del arreglo a la tabla
+                exito, tipo_previo = self.tabla.declarar(nombre_var, tipo_var_str, tamano_arreglo)
                 if not exito:
                     self.registrar_warning(f"Warning ambiguity '{tipo_var_str[:3].lower()}' to '{tipo_previo[:3].lower()}'")
                 
                 if self.token_actual.type == TokenType.IGUAL:
+                    # Validar semánticamente que no se asigne valor directo a un arreglo entero en su Dim
+                    if tamano_arreglo is not None:
+                        self.registrar_warning("Warning cannot assign direct value to array during declaration")
                     self.consumir()
-                    self.saltar_expresion() 
+                    self.saltar_expresion()
         else:
             self.saltar_expresion()
 
@@ -717,31 +783,56 @@ class CompiladorProyecto:
         nombre_var = self.token_actual.value
         self.consumir()
         
-        # 1. Obtenemos qué tipo de dato debería ser esta variable
+        # 1. Obtenemos información de la variable
         tipo_esperado = self.tabla.obtener_tipo(nombre_var)
+        info_var = None
+        for ambito in reversed(self.tabla.scopes):
+            if nombre_var in ambito:
+                info_var = ambito[nombre_var]
+                break
+                
+        es_arreglo = info_var and info_var.get("es_arreglo")
+        indice_arreglo = None
         
         if not self.tabla.existe(nombre_var):
             self.registrar_warning(f"Warning undefine type '{nombre_var}'")
-            
+
+        # --- Parsear el índice si la variable es un arreglo ---
+        if es_arreglo:
+            if self.token_actual.type == TokenType.PAREN_A:
+                self.consumir()
+                indice_arreglo = self.analizar_expresion_logica()
+                
+                if self.token_actual.type == TokenType.PAREN_C:
+                    self.consumir()
+                else:
+                    self.registrar_warning(f"Warning missing ')' in array assignment '{nombre_var}'")
+                
+                # Generamos el cuádruplo de protección de límites
+                self.emitir_cuadruplo('VERIF', indice_arreglo, '0', info_var['limite'])
+            else:
+                self.registrar_warning(f"Warning expected index for array '{nombre_var}'")
+
         if self.token_actual.type == TokenType.IGUAL:
             self.consumir() # Consumir el '='
             
             # 2. Procesamos toda la expresión a la derecha del igual
             resultado_expresion = self.analizar_expresion_logica()
             
-            # --- VALIDACIÓN DE ASIGNACIÓN ---
-            if tipo_esperado: # Solo validamos si la variable sí existía
+            # Validación semántica estándar
+            if tipo_esperado: 
                 tipo_resultado = self._inferir_tipo(resultado_expresion)
-                
-                # Validamos que los tipos coincidan
                 if tipo_resultado and tipo_resultado != "Unknown" and tipo_esperado != tipo_resultado:
-                    
-                    # Excepción: Permitimos guardar un Integer en un Double (Casteo implícito)
                     if not (tipo_esperado == 'Double' and tipo_resultado == 'Integer'):
                         self.registrar_warning(f"Warning type mismatch: Cannot assign '{tipo_resultado}' to '{tipo_esperado}' variable '{nombre_var}'")
             
-            # 3. Emitimos el cuádruplo final de asignación
-            self.emitir_cuadruplo('=', resultado_expresion, '', nombre_var)
+            # --- Generar el cuádruplo de asignación correcto ---
+            if es_arreglo and indice_arreglo:
+                # Escribimos en una posición de memoria (Puntero indirecto)
+                self.emitir_cuadruplo('ASIG_ARR', resultado_expresion, indice_arreglo, nombre_var)
+            else:
+                # Asignación normal
+                self.emitir_cuadruplo('=', resultado_expresion, '', nombre_var)
 
     def _analizar_invalid_id(self):
         self.registrar_warning(f"Warning undefined varible '{self.token_actual.value}'")
@@ -976,6 +1067,89 @@ class CompiladorProyecto:
 
         return "ERROR"
 
+    def _analizar_function(self):
+        linea_inicio = self.token_actual.linea
+        self.consumir() # Consumimos 'Function'
+        
+        if self.token_actual.type == TokenType.IDENTIFICADOR:
+            nombre_funcion = self.token_actual.value
+            self.consumir()
+            
+            parametros = []
+            
+            # 1. Parsear los parámetros
+            if self.token_actual.type == TokenType.PAREN_A:
+                self.consumir()
+                
+                # Entramos al ámbito de la función ANTES de declarar los parámetros
+                # para que los parámetros se guarden como variables locales de esta función
+                self.tabla.entrar_ambito()
+                self.en_sub = True # Reutilizamos esta bandera para saber que estamos dentro de un bloque
+                
+                while self.token_actual.type == TokenType.IDENTIFICADOR:
+                    nom_param = self.token_actual.value
+                    self.consumir()
+                    
+                    if self.token_actual.type == TokenType.AS:
+                        self.consumir()
+                        tipo_param = self.token_actual.value
+                        
+                        # Guardamos el parámetro en la tabla local de la función
+                        self.tabla.declarar(nom_param, tipo_param)
+                        # Añadimos el tipo a la "firma" de la función
+                        parametros.append(tipo_param)
+                        
+                        self.consumir() # Consumimos el tipo
+                    else:
+                        self.registrar_warning(f"Warning expected 'As' for parameter '{nom_param}'")
+                        
+                    if self.token_actual.type == TokenType.COMA:
+                        self.consumir()
+                    else:
+                        break # Terminaron los parámetros
+                        
+                if self.token_actual.type == TokenType.PAREN_C:
+                    self.consumir()
+                else:
+                    self.registrar_warning("Warning missing ')' in function parameters")
+            else:
+                self.registrar_warning("Warning expected '(' after function name")
+                self.tabla.entrar_ambito()
+                self.en_sub = True
+
+            # 2. Parsear el tipo de retorno
+            tipo_retorno = "Void"
+            if self.token_actual.type == TokenType.AS:
+                self.consumir()
+                tipo_retorno = self.token_actual.value
+                self.consumir()
+                
+            # 3. Registrar la función en la tabla global
+            cuad_inicio = len(self.cuadruplos)
+            exito = self.tabla.declarar_funcion(nombre_funcion, tipo_retorno, parametros, cuad_inicio)
+            if not exito:
+                self.registrar_warning(f"Warning duplicate function definition '{nombre_funcion}'")
+                
+            self.pila_estructuras_abiertas.append("Function")
+            
+        else:
+            self.registrar_warning("Warning expected function name")
+
+    def _analizar_return(self):
+        self.consumir()
+        
+        estructura_top = self.pila_estructuras_abiertas[-1] if self.pila_estructuras_abiertas else None
+        if estructura_top != "Function":
+            self.registrar_warning("Warning 'Return' statement outside of a Function")
+            
+        # Parseamos lo que sea que vayamos a devolver
+        valor_retorno = self.analizar_expresion_logica()
+        
+        # Opcional: Aquí podrías validar semánticamente que el 'tipo' de valor_retorno 
+        # coincida con el 'tipo_retorno' de la función actual.
+        
+        self.emitir_cuadruplo('RETURN', valor_retorno, '', '')
+
     def saltar_expresion(self, tipo_esperado=None, tokens_parada=None):
         
         if tokens_parada is None:
@@ -1107,9 +1281,94 @@ class CompiladorProyecto:
         
         # Caso 1: Es un número o una variable
         if t.type in [TokenType.NUMERO, TokenType.IDENTIFICADOR]:
-            # Aquí también podrías llamar a self.tabla.existe() para validación semántica
             valor_operando = t.value 
             self.consumir()
+            
+            if t.type == TokenType.IDENTIFICADOR:
+                
+                # --- 1. Detectar si es una llamada a función ---
+                # Revisamos si existe en el ámbito global (0) y si tiene la bandera 'es_funcion'
+                if valor_operando in self.tabla.scopes[0] and self.tabla.scopes[0][valor_operando].get("es_funcion"):
+                    info_func = self.tabla.scopes[0][valor_operando]
+                    
+                    if self.token_actual.type == TokenType.PAREN_A:
+                        self.consumir()
+                        
+                        # A. Preparamos la memoria
+                        self.emitir_cuadruplo('ERA', valor_operando, '', '')
+                        
+                        # B. Procesamos los argumentos
+                        k = 0
+                        if self.token_actual.type != TokenType.PAREN_C:
+                            while True:
+                                arg_exp = self.analizar_expresion_logica()
+                                tipo_arg = self._inferir_tipo(arg_exp)
+                                
+                                # Validación semántica de los parámetros
+                                if k < len(info_func["parametros"]):
+                                    tipo_esperado = info_func["parametros"][k]
+                                    if tipo_arg and tipo_arg != "Unknown" and tipo_esperado != tipo_arg:
+                                        self.registrar_warning(f"Warning type mismatch: Argument {k+1} of '{valor_operando}' expects '{tipo_esperado}', got '{tipo_arg}'")
+                                else:
+                                    self.registrar_warning(f"Warning too many arguments for function '{valor_operando}'")
+                                
+                                # Emitimos el cuádruplo del parámetro
+                                self.emitir_cuadruplo('PARAM', arg_exp, '', f'Param{k}')
+                                k += 1
+                                
+                                if self.token_actual.type == TokenType.COMA:
+                                    self.consumir()
+                                else:
+                                    break
+                                    
+                        if k < len(info_func["parametros"]):
+                            self.registrar_warning(f"Warning too few arguments for function '{valor_operando}'")
+                            
+                        if self.token_actual.type == TokenType.PAREN_C:
+                            self.consumir()
+                        else:
+                            self.registrar_warning(f"Warning missing ')' in call to '{valor_operando}'")
+                            
+                        # C. Hacemos el salto GOSUB a la línea donde inicia la función
+                        self.emitir_cuadruplo('GOSUB', valor_operando, '', f"L{info_func['cuad_inicio']}")
+                        
+                        # D. Extraemos el valor de retorno a un temporal
+                        temp_retorno = self.generar_temporal()
+                        self.tipos_temporales[temp_retorno] = info_func["tipo"]
+                        
+                        # se asigna el "nombre" de la función al temporal
+                        self.emitir_cuadruplo('=', valor_operando, '', temp_retorno)
+                        
+                        return temp_retorno
+            
+            # --- 2. Detectar si es lectura de un arreglo ---
+                info_var = None
+                for ambito in reversed(self.tabla.scopes):
+                    if valor_operando in ambito:
+                        info_var = ambito[valor_operando]
+                        break
+                        
+                if info_var and info_var.get("es_arreglo"):
+                    if self.token_actual.type == TokenType.PAREN_A:
+                        self.consumir()
+                        indice_exp = self.analizar_expresion_logica()
+                        
+                        if self.token_actual.type == TokenType.PAREN_C:
+                            self.consumir()
+                        else:
+                            self.registrar_warning(f"Warning missing ')' in array access '{valor_operando}'")
+                        
+                        self.emitir_cuadruplo('VERIF', indice_exp, '0', info_var['limite'])
+                        
+                        temp_valor = self.generar_temporal()
+                        self.tipos_temporales[temp_valor] = info_var['tipo'] 
+                        
+                        self.emitir_cuadruplo('ACCESO_ARR', valor_operando, indice_exp, temp_valor)
+                        
+                        return temp_valor
+                    else:
+                        self.registrar_warning(f"Warning expected index for array '{valor_operando}'")
+            # Si no es función ni arreglo, es una variable normal
             return valor_operando
             
         # Caso 2: Es una cadena o booleano (Ajustar según necesites)
