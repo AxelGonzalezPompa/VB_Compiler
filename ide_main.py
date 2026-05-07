@@ -1,17 +1,28 @@
 import tkinter as tk
-from tkinter import messagebox, filedialog
+from tkinter import ttk, messagebox, filedialog
 import re
 from compiler_engine import CompiladorProyecto
 import sys
 from virtual_machine import VirtualMachine
+import ast
 
 class ConsolaRedirigida:
     def __init__(self, text_widget):
         self.text_widget = text_widget
         
     def write(self, mensaje):
-        self.text_widget.insert(tk.END, mensaje)
+        self.text_widget.config(state='normal')
+        # Si el mensaje tiene ">>", es un Print de la VM (Naranja)
+        if ">>" in mensaje:
+            self.text_widget.insert(tk.END, mensaje, "VM_Out")
+        # Si el mensaje dice "CRASH", es un error de la VM (Rojo)
+        elif "CRASH" in mensaje or "Excepción" in mensaje:
+            self.text_widget.insert(tk.END, mensaje, "ConsoleError")
+        else:
+            self.text_widget.insert(tk.END, mensaje, "ConsoleNormal")
+            
         self.text_widget.see(tk.END)
+        self.text_widget.config(state='disabled')
         
     def flush(self):
         pass
@@ -22,6 +33,7 @@ class IDEVisualBasic:
         self.root.title("IDE Visual Basic")
         self.root.geometry("900x650")
         self.root.iconbitmap("icons/icon.ico")
+        self.root.configure(bg="#00332a")
         self.ruta_archivo_actual = None
         self.timer_sintaxis = None
 
@@ -37,12 +49,22 @@ class IDEVisualBasic:
         self.paned_window.pack(expand=True, fill='both', padx=5, pady=5)
 
         # 1. Panel Superior: Frame Principal (Editor)
-        self.editor_frame = tk.Frame(self.paned_window)
-        # Añadimos el editor al panel. stretch="always" hace que el editor ocupe el espacio principal
-        self.paned_window.add(self.editor_frame, stretch="always") 
+        self.editor_frame = tk.Frame(self.paned_window, bg="#00332a")
+        self.paned_window.add(self.editor_frame, stretch="always")
 
         # Scrollbar del editor
-        self.scrollbar = tk.Scrollbar(self.editor_frame)
+        style = ttk.Style()
+        style.theme_use('clam') # 'clam' permite modificar los colores nativos de Windows
+        style.configure("Dark.Vertical.TScrollbar", 
+                        background="#004d40",      # Color de la barra movible
+                        troughcolor="#00211b",     # Color del fondo del carril
+                        bordercolor="#00211b",     # Sin bordes blancos
+                        arrowcolor="white",        # Flechas blancas
+                        lightcolor="#004d40", 
+                        darkcolor="#00332a")
+
+        # Cambiamos tk.Scrollbar por ttk.Scrollbar y le aplicamos el estilo
+        self.scrollbar = ttk.Scrollbar(self.editor_frame, style="Dark.Vertical.TScrollbar")
         self.scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
         # Widget de números de línea
@@ -80,13 +102,47 @@ class IDEVisualBasic:
         self.text_area.bind('<BackSpace>', self.borrar_indentacion)
         
         # 2. Panel Inferior: Output/Consola
-        self.output_area = tk.Text(self.paned_window, height=8, bg=self.bg_color, fg=self.text_fg,
-                                   insertbackground='white', font=("Consolas", 10))
-        # Añadimos la consola al panel. stretch="never" mantiene su tamaño inicial hasta que tú lo arrastres
+        # Cambiamos el fondo a un verde mucho más oscuro (#00211b), agregamos padding (padx, pady) y quitamos el borde
+        self.output_area = tk.Text(self.paned_window, height=8, bg="#00211b", fg="#e0e0e0",
+                                   insertbackground='white', font=("Consolas", 11), 
+                                   padx=15, pady=10, borderwidth=0)
         self.paned_window.add(self.output_area, stretch="never") 
+
+        # Etiquetas de color para la Consola
+        self.output_area.tag_configure("ConsoleHeader", foreground="#81d4fa", font=("Consolas", 11, "bold")) # Azul Claro
+        self.output_area.tag_configure("ConsoleNormal", foreground="#e0e0e0")                                # Blanco opaco
+        self.output_area.tag_configure("ConsoleSuccess", foreground="#a5d6a7")                               # Verde
+        self.output_area.tag_configure("ConsoleError", foreground="#ef9a9a", font=("Consolas", 11, "bold"))  # Rojo
+        self.output_area.tag_configure("ConsoleInfo", foreground="#ce93d8")                                  # Morado
+        self.output_area.tag_configure("VM_Out", foreground="#ffcc80", font=("Consolas", 12, "bold"))        # Naranja resaltado
         
-        self.output_area.insert('1.0', "Listo. Esperando código VB...\n")
+        self.output_area.insert('1.0', "⚡ Terminal lista. Esperando ejecución...\n", "ConsoleInfo")
         self.output_area.config(state='disabled')
+
+        # Etiquetas avanzadas para Lexer
+        self.output_area.tag_configure("LexPunct", foreground="#546e7a") # Gris oscuro para los < >
+        self.output_area.tag_configure("LexType", foreground="#ce93d8", font=("Consolas", 11, "bold")) # Morado para el tipo
+        self.output_area.tag_configure("LexValue", foreground="#a5d6a7") # Verde para el valor del token
+
+        # Etiquetas avanzadas para Cuádruplos
+        self.output_area.tag_configure("QuadIndex", foreground="#78909c") # Gris azulado
+        self.output_area.tag_configure("QuadPunct", foreground="#546e7a") # Gris oscuro
+        self.output_area.tag_configure("QuadOp", foreground="#f48fb1", font=("Consolas", 11, "bold")) # Rosa
+        self.output_area.tag_configure("QuadArg", foreground="#c5e1a5") # Verde claro
+        self.output_area.tag_configure("QuadRes", foreground="#81d4fa", font=("Consolas", 11, "bold")) # Azul claro
+        
+        # Equites avanzadas para Tabla de Simbolos
+        self.output_area.tag_configure("SymLabel", foreground="#78909c") # Gris
+        self.output_area.tag_configure("SymName", foreground="#ffcc80", font=("Consolas", 11, "bold")) # Naranja
+        self.output_area.tag_configure("SymScope", foreground="#b39ddb", font=("Consolas", 11, "italic")) # Morado
+        self.output_area.tag_configure("SymDict", foreground="#e0e0e0") # Blanco
+
+        # Colores para el diccionario
+        self.output_area.tag_configure("SymPunct", foreground="#546e7a")       # Gris oscuro para { } : ,
+        self.output_area.tag_configure("SymKey", foreground="#81d4fa")         # Azul claro para las llaves ('tipo')
+        self.output_area.tag_configure("SymValueStr", foreground="#a5d6a7")    # Verde para texto ('Integer')
+        self.output_area.tag_configure("SymValueNum", foreground="#ffb74d")    # Naranja para números (1000)
+        self.output_area.tag_configure("SymValueBool", foreground="#f48fb1", font=("Consolas", 11, "italic")) # Rosa cursiva para True/False
 
         # Menus
         self.crear_menus()
@@ -273,12 +329,29 @@ class IDEVisualBasic:
 
     # --- Lógica de menús ---
     def crear_menus(self):
-        menubar = tk.Menu(self.root)
-        self.root.config(menu=menubar)
+        # 1. Crear el Frame que simulará la barra de menús
+        self.barra_menu = tk.Frame(self.root, bg="#00211b")
+        # Lo empaquetamos ANTES del paned_window para que quede hasta arriba
+        self.barra_menu.pack(side=tk.TOP, fill=tk.X, before=self.paned_window)
 
-        # Menú Archivo
-        archivo_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Archivo", menu=archivo_menu)
+        # 2. Estilos para los botones de la barra y los submenús
+        estilo_btn = {
+            "bg": "#00211b", "fg": "#e0e0e0",
+            "activebackground": "#004d40", "activeforeground": "white",
+            "bd": 0, "padx": 10, "pady": 4, "font": ("Segoe UI", 10)
+        }
+        estilo_submenu = {
+            "bg": "#00211b", "fg": "#e0e0e0",
+            "activebackground": "#004d40", "activeforeground": "white",
+            "bd": 0, "relief": "flat", "font": ("Segoe UI", 10)
+        }
+
+        # --- Menú Archivo ---
+        btn_archivo = tk.Menubutton(self.barra_menu, text="Archivo", **estilo_btn)
+        btn_archivo.pack(side=tk.LEFT)
+        archivo_menu = tk.Menu(btn_archivo, tearoff=0, **estilo_submenu)
+        btn_archivo.config(menu=archivo_menu)
+        
         archivo_menu.add_command(label="Abrir (Ctrl+A)", command=self.abrir_archivo)
         archivo_menu.add_command(label="Guardar (Ctrl+G)", command=self.guardar_archivo)
         archivo_menu.add_command(label="Guardar Como (Ctrl+Shift+G)", command=self.guardar_como)
@@ -286,9 +359,12 @@ class IDEVisualBasic:
         archivo_menu.add_command(label="Limpiar Pantalla", command=lambda: self.text_area.delete('1.0', tk.END))
         archivo_menu.add_command(label="Cerrar (Ctrl+Q)", command=self.cerrar_app)
 
-        # Menú Editar
-        editar_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Editar", menu=editar_menu)
+        # --- Menú Editar ---
+        btn_editar = tk.Menubutton(self.barra_menu, text="Editar", **estilo_btn)
+        btn_editar.pack(side=tk.LEFT)
+        editar_menu = tk.Menu(btn_editar, tearoff=0, **estilo_submenu)
+        btn_editar.config(menu=editar_menu)
+
         editar_menu.add_command(label="Deshacer (Ctrl+Z)", command=self.text_area.edit_undo)
         editar_menu.add_command(label="Rehacer (Ctrl+Y)", command=self.text_area.edit_redo)
         editar_menu.add_separator()
@@ -298,17 +374,22 @@ class IDEVisualBasic:
         editar_menu.add_separator()
         editar_menu.add_command(label="Seleccionar todo", command=self.seleccionar_todo)
 
-        # Menú Ejecutar
-        ejecutar_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Ejecutar", menu=ejecutar_menu)
+        # --- Menú Ejecutar ---
+        btn_ejecutar = tk.Menubutton(self.barra_menu, text="Ejecutar", **estilo_btn)
+        btn_ejecutar.pack(side=tk.LEFT)
+        ejecutar_menu = tk.Menu(btn_ejecutar, tearoff=0, **estilo_submenu)
+        btn_ejecutar.config(menu=ejecutar_menu)
+
         ejecutar_menu.add_command(label="Iniciar Depuración", command=lambda: self.log_salida("Iniciando depuración..."))
         ejecutar_menu.add_command(label="Ejecutar sin Depuración (Ctrl+F5)", command=self.ejecutar_programa)
         ejecutar_menu.add_separator()
         ejecutar_menu.add_command(label="Detener Ejecución", command=lambda: self.log_salida("Ejecución detenida."))
 
-        # Menú Compiladores
-        compiladores_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Compiladores", menu=compiladores_menu)
+        # --- Menú Compiladores ---
+        btn_compiladores = tk.Menubutton(self.barra_menu, text="Compiladores", **estilo_btn)
+        btn_compiladores.pack(side=tk.LEFT)
+        compiladores_menu = tk.Menu(btn_compiladores, tearoff=0, **estilo_submenu)
+        btn_compiladores.config(menu=compiladores_menu)
         
         compiladores_menu.add_command(label="Análisis Léxico", command=self.ejecutar_lexico)
         compiladores_menu.add_command(label="Análisis Sintáctico", command=self.ejecutar_sintactico)
@@ -318,11 +399,13 @@ class IDEVisualBasic:
         compiladores_menu.add_separator()
         compiladores_menu.add_command(label="Compilación Completa (F5)", command=self.ejecutar_compilador)
 
-        # Menú Ayuda
-        ayuda_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Ayuda", menu=ayuda_menu)
+        # --- Menú Ayuda ---
+        btn_ayuda = tk.Menubutton(self.barra_menu, text="Ayuda", **estilo_btn)
+        btn_ayuda.pack(side=tk.LEFT)
+        ayuda_menu = tk.Menu(btn_ayuda, tearoff=0, **estilo_submenu)
+        btn_ayuda.config(menu=ayuda_menu)
 
-        imports_menu = tk.Menu(ayuda_menu, tearoff=0)
+        imports_menu = tk.Menu(ayuda_menu, tearoff=0, **estilo_submenu)
         ayuda_menu.add_cascade(label="Imports", menu=imports_menu)
         
         vb_libs = ["System", "System.IO", "System.Math", "System.Windows.Forms", "Microsoft.VisualBasic"]
@@ -332,11 +415,13 @@ class IDEVisualBasic:
         ayuda_menu.add_command(label="Estructura Main", command=self.insertar_main_vb)
         ayuda_menu.add_command(label="Acerca de...", command=self.mostrar_info_acerca_de)
 
-        # Menú Variables
-        variables_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Variables", menu=variables_menu)
+        # --- Menú Variables ---
+        btn_variables = tk.Menubutton(self.barra_menu, text="Variables", **estilo_btn)
+        btn_variables.pack(side=tk.LEFT)
+        variables_menu = tk.Menu(btn_variables, tearoff=0, **estilo_submenu)
+        btn_variables.config(menu=variables_menu)
         
-        tipos_menu = tk.Menu(variables_menu, tearoff=0)
+        tipos_menu = tk.Menu(variables_menu, tearoff=0, **estilo_submenu)
         variables_menu.add_cascade(label="Tipos", menu=tipos_menu)
         
         tipos_menu.add_command(label="Integer", command=lambda: self.insertar_tipo_vb("Integer", "System"))
@@ -407,14 +492,15 @@ class IDEVisualBasic:
 
     def log_salida(self, mensaje):
         self.output_area.config(state='normal')
-        self.output_area.insert(tk.END, f">> {mensaje}\n")
+        self.output_area.insert(tk.END, f">> {mensaje}\n", "ConsoleInfo")
         self.output_area.config(state='disabled')
         self.output_area.see(tk.END)
 
     def preparar_consola(self, titulo):
         self.output_area.config(state='normal')
         self.output_area.delete('1.0', tk.END)
-        self.output_area.insert(tk.END, f"--- {titulo} ---\n")
+        self.output_area.insert(tk.END, f"❖ {titulo} ❖\n", "ConsoleHeader")
+        self.output_area.insert(tk.END, "═" * 60 + "\n\n", "ConsoleHeader")
 
     def finalizar_consola(self):
         self.output_area.config(state='disabled')
@@ -424,23 +510,54 @@ class IDEVisualBasic:
         self.preparar_consola("ANÁLISIS LÉXICO")
         compilador = CompiladorProyecto(self.text_area.get('1.0', tk.END))
         tokens = compilador.obtener_tokens_vertical()
-        self.output_area.insert(tk.END, "\n".join(tokens) if tokens else "No se encontraron tokens.")
+        
+        if tokens:
+            for t in tokens:
+                # Quitamos los símbolos < > de los extremos y separamos por la coma
+                if t.startswith("<") and t.endswith(">"):
+                    contenido = t[1:-1]
+                    if ", " in contenido:
+                        tipo_token, valor_token = contenido.split(", ", 1)
+                        
+                        self.output_area.insert(tk.END, "<", "LexPunct")
+                        self.output_area.insert(tk.END, f"{tipo_token}", "LexType")
+                        self.output_area.insert(tk.END, ", ", "LexPunct")
+                        self.output_area.insert(tk.END, f"{valor_token}", "LexValue")
+                        self.output_area.insert(tk.END, ">\n", "LexPunct")
+                    else:
+                        self.output_area.insert(tk.END, f"{t}\n", "ConsoleNormal")
+                else:
+                    self.output_area.insert(tk.END, f"{t}\n", "ConsoleNormal")
+        else:
+            self.output_area.insert(tk.END, "No se encontraron tokens.\n", "ConsoleError")
+            
         self.finalizar_consola()
 
     def ejecutar_sintactico(self):
         self.preparar_consola("ANÁLISIS SINTÁCTICO")
         compilador = CompiladorProyecto(self.text_area.get('1.0', tk.END))
-        errores = compilador.filtrar_warnings(["missing", "unexpected", "instruction", "scope", "parenthesis", "unclosed"])
-        self.output_area.insert(tk.END, "\n".join(errores) + "\n" if errores else "Sintaxis correcta.\n")
+        errores = compilador.filtrar_warnings(["missing", "unexpected", "instruction", "scope", "parenthesis", "unclosed", "incomplete"])
+        
+        if errores:
+            for error in errores:
+                self.output_area.insert(tk.END, f">> {error}\n", "ConsoleError")
+        else:
+            self.output_area.insert(tk.END, "✓ Sintaxis correcta.\n", "ConsoleSuccess")
+            
         self.resaltar_errores(errores)
         self.finalizar_consola()
 
     def ejecutar_semantico(self):
         self.preparar_consola("ANÁLISIS SEMÁNTICO")
         compilador = CompiladorProyecto(self.text_area.get('1.0', tk.END))
-        errores = compilador.filtrar_warnings(["type", "undefine", "ambiguity", "variable", "invalid"])
+        errores = compilador.filtrar_warnings(["type", "undefine", "ambiguity", "variable", "invalid", "mismatch"])
         
-        self.output_area.insert(tk.END, "\n".join(errores) + "\n" if errores else "Semántica correcta.\n")
+        if errores:
+            for error in errores:
+                self.output_area.insert(tk.END, f">> {error}\n", "ConsoleError")
+        else:
+            self.output_area.insert(tk.END, "✓ Semántica correcta.\n", "ConsoleSuccess")
+            
         self.resaltar_errores(errores)
         self.finalizar_consola()
 
@@ -449,7 +566,85 @@ class IDEVisualBasic:
         compilador = CompiladorProyecto(self.text_area.get('1.0', tk.END))
         compilador.analizar_todo()
         tabla = compilador.obtener_formato_tabla()
-        self.output_area.insert(tk.END, "\n".join(tabla) if tabla else "Tabla vacía.")
+        
+        if tabla:
+            for linea in tabla:
+                if linea.strip():
+                    if " -> " in linea:
+                        izq, der = linea.split(" -> ", 1)
+                        texto_izq = izq.replace("ID: ", "")
+                        nombre = texto_izq
+                        scope = ""
+                        if " (" in texto_izq:
+                            nombre, scope = texto_izq.split(" (", 1)
+                            scope = " (" + scope
+                        
+                        self.output_area.insert(tk.END, "ID: ", "SymLabel")
+                        self.output_area.insert(tk.END, f"{nombre}", "SymName")
+                        if scope:
+                            self.output_area.insert(tk.END, f"{scope}", "SymScope")
+                        self.output_area.insert(tk.END, " -> ", "SymLabel")
+                        # Coloreado de diccionario
+                        try:
+                            # Convertimos el string de texto a un diccionario de verdad
+                            diccionario = ast.literal_eval(der)
+                            self.output_area.insert(tk.END, "{", "SymPunct")
+                            
+                            items = list(diccionario.items())
+                            for idx, (k, v) in enumerate(items):
+                                # Pintar la Llave
+                                self.output_area.insert(tk.END, f"'{k}'", "SymKey")
+                                self.output_area.insert(tk.END, ": ", "SymPunct")
+                                
+                                # Pintar el Valor dependiendo de su tipo
+                                if isinstance(v, str):
+                                    self.output_area.insert(tk.END, f"'{v}'", "SymValueStr")
+                                elif isinstance(v, bool): # Es importante poner bool antes que int en Python
+                                    self.output_area.insert(tk.END, str(v), "SymValueBool")
+                                elif isinstance(v, (int, float)):
+                                    self.output_area.insert(tk.END, str(v), "SymValueNum")
+                                else:
+                                    # Para listas y otras estructuras complejas
+                                    self.output_area.insert(tk.END, repr(v), "SymDict")
+                                
+                                # Coma separadora (excepto en el último elemento)
+                                if idx < len(items) - 1:
+                                    self.output_area.insert(tk.END, ", ", "SymPunct")
+                                    
+                            self.output_area.insert(tk.END, "}\n", "SymPunct")
+                        except Exception:
+                            # Si por alguna razón falla el parseo, se imprime blanco como antes
+                            self.output_area.insert(tk.END, f"{der}\n", "SymDict")
+                    else:
+                        self.output_area.insert(tk.END, f"{linea}\n", "ConsoleInfo")
+        else:
+            self.output_area.insert(tk.END, "Tabla vacía.\n", "ConsoleNormal")
+            
+        self.finalizar_consola()
+
+    def mostrar_cuadruplos(self):
+        self.preparar_consola("CÓDIGO INTERMEDIO (CUÁDRUPLOS)")
+        codigo_fuente = self.text_area.get('1.0', tk.END)
+        compilador = CompiladorProyecto(codigo_fuente)
+        compilador.analizar_todo() 
+        
+        cuadruplos = compilador.cuadruplos
+        
+        if cuadruplos:
+            for i, cuad in enumerate(cuadruplos):
+                self.output_area.insert(tk.END, f"{i}: ", "QuadIndex")
+                self.output_area.insert(tk.END, "(", "QuadPunct")
+                self.output_area.insert(tk.END, f"'{cuad[0]}'", "QuadOp")
+                self.output_area.insert(tk.END, ", ", "QuadPunct")
+                self.output_area.insert(tk.END, f"'{cuad[1]}'", "QuadArg")
+                self.output_area.insert(tk.END, ", ", "QuadPunct")
+                self.output_area.insert(tk.END, f"'{cuad[2]}'", "QuadArg")
+                self.output_area.insert(tk.END, ", ", "QuadPunct")
+                self.output_area.insert(tk.END, f"'{cuad[3]}'", "QuadRes")
+                self.output_area.insert(tk.END, ")\n", "QuadPunct")
+        else:
+            self.output_area.insert(tk.END, "No se generaron cuádruplos (revisa errores sintácticos).\n", "ConsoleError")
+            
         self.finalizar_consola()
 
     def ejecutar_compilador(self):
@@ -460,56 +655,119 @@ class IDEVisualBasic:
         self.output_area.config(state='normal')
         self.output_area.delete('1.0', tk.END)
         
+        # Función auxiliar para imprimir encabezados con el diamante
+        def imprimir_encabezado(titulo):
+            self.output_area.insert(tk.END, f"\n◆ {titulo} ◆\n", "ConsoleHeader")
+            self.output_area.insert(tk.END, "═" * 40 + "\n", "ConsoleHeader")
+
         # --- APARTADO LÉXICO ---
-        self.output_area.insert(tk.END, "--- ANÁLISIS LÉXICO ---\n")
-        self.output_area.insert(tk.END, "\n".join(resultados["lexico"]) + "\n\n")
+        imprimir_encabezado("ANÁLISIS LÉXICO")
+        if resultados["lexico"]:
+            for t in resultados["lexico"]:
+                if t.startswith("<") and t.endswith(">"):
+                    contenido = t[1:-1]
+                    if ", " in contenido:
+                        tipo_token, valor_token = contenido.split(", ", 1)
+                        
+                        self.output_area.insert(tk.END, "<", "LexPunct")
+                        self.output_area.insert(tk.END, f"{tipo_token}", "LexType")
+                        self.output_area.insert(tk.END, ", ", "LexPunct")
+                        self.output_area.insert(tk.END, f"{valor_token}", "LexValue")
+                        self.output_area.insert(tk.END, ">\n", "LexPunct")
+                    else:
+                        self.output_area.insert(tk.END, f"{t}\n", "ConsoleNormal")
+                else:
+                    self.output_area.insert(tk.END, f"{t}\n", "ConsoleNormal")
 
-        # --- APARTADO SINTÁCTICO Y SEMÁNTICO ---
-        self.output_area.insert(tk.END, "--- ANÁLISIS SINTÁCTICO ---\n")
+        # --- APARTADO SINTÁCTICO ---
+        imprimir_encabezado("ANÁLISIS SINTÁCTICO")
         if resultados["sintactico"]:
-            for res in resultados["sintactico"]: self.output_area.insert(tk.END, f">> {res}\n")
-        else: self.output_area.insert(tk.END, "Sin errores sintácticos.\n")
+            for res in resultados["sintactico"]: self.output_area.insert(tk.END, f">> {res}\n", "ConsoleError")
+        else: 
+            self.output_area.insert(tk.END, "✓ Sin errores sintácticos.\n", "ConsoleSuccess")
 
-        self.output_area.insert(tk.END, "\n--- ANÁLISIS SEMÁNTICO ---\n")
+        # --- APARTADO SEMÁNTICO ---
+        imprimir_encabezado("ANÁLISIS SEMÁNTICO")
         if resultados["semantico"]:
-            for res in resultados["semantico"]: self.output_area.insert(tk.END, f">> {res}\n")
-        else: self.output_area.insert(tk.END, "Sin errores semánticos.\n")
+            for res in resultados["semantico"]: self.output_area.insert(tk.END, f">> {res}\n", "ConsoleError")
+        else: 
+            self.output_area.insert(tk.END, "✓ Sin errores semánticos.\n", "ConsoleSuccess")
         
-        # --- NUEVO: APARTADO DE CUÁDRUPLOS ---
-        self.output_area.insert(tk.END, "\n--- CÓDIGO INTERMEDIO (CUÁDRUPLOS) ---\n")
+        # --- APARTADO DE CUÁDRUPLOS (MULTICOLOR) ---
+        imprimir_encabezado("CÓDIGO INTERMEDIO (CUÁDRUPLOS)")
         if "cuadruplos" in resultados and resultados["cuadruplos"]:
             for i, cuad in enumerate(resultados["cuadruplos"]):
-                self.output_area.insert(tk.END, f"{i}: {cuad}\n")
+                self.output_area.insert(tk.END, f"{i}: ", "QuadIndex")
+                self.output_area.insert(tk.END, "(", "QuadPunct")
+                self.output_area.insert(tk.END, f"'{cuad[0]}'", "QuadOp")
+                self.output_area.insert(tk.END, ", ", "QuadPunct")
+                self.output_area.insert(tk.END, f"'{cuad[1]}'", "QuadArg")
+                self.output_area.insert(tk.END, ", ", "QuadPunct")
+                self.output_area.insert(tk.END, f"'{cuad[2]}'", "QuadArg")
+                self.output_area.insert(tk.END, ", ", "QuadPunct")
+                self.output_area.insert(tk.END, f"'{cuad[3]}'", "QuadRes")
+                self.output_area.insert(tk.END, ")\n", "QuadPunct")
         else:
-            self.output_area.insert(tk.END, "Sin cuádruplos generados.\n")
+            self.output_area.insert(tk.END, "Sin cuádruplos generados.\n", "ConsoleNormal")
 
-        # --- TABLA DE SÍMBOLOS ---
-        self.output_area.insert(tk.END, "\n--- TABLA DE SÍMBOLOS ---\n")
-        self.output_area.insert(tk.END, "\n".join(resultados["tabla"]))
+        # --- TABLA DE SÍMBOLOS (MULTICOLOR) ---
+        imprimir_encabezado("TABLA DE SÍMBOLOS")
+        if resultados["tabla"]:
+            for linea in resultados["tabla"]:
+                if linea.strip():
+                    if " -> " in linea:
+                        izq, der = linea.split(" -> ", 1)
+                        texto_izq = izq.replace("ID: ", "")
+                        nombre = texto_izq
+                        scope = ""
+                        if " (" in texto_izq:
+                            nombre, scope = texto_izq.split(" (", 1)
+                            scope = " (" + scope
+                        
+                        self.output_area.insert(tk.END, "ID: ", "SymLabel")
+                        self.output_area.insert(tk.END, f"{nombre}", "SymName")
+                        if scope:
+                            self.output_area.insert(tk.END, f"{scope}", "SymScope")
+                        self.output_area.insert(tk.END, " -> ", "SymLabel")
+                        # Coloreado de diccionario
+                        try:
+                            # Convertimos el string de texto a un diccionario de verdad
+                            diccionario = ast.literal_eval(der)
+                            self.output_area.insert(tk.END, "{", "SymPunct")
+                            
+                            items = list(diccionario.items())
+                            for idx, (k, v) in enumerate(items):
+                                # Pintar la Llave
+                                self.output_area.insert(tk.END, f"'{k}'", "SymKey")
+                                self.output_area.insert(tk.END, ": ", "SymPunct")
+                                
+                                # Pintar el Valor dependiendo de su tipo
+                                if isinstance(v, str):
+                                    self.output_area.insert(tk.END, f"'{v}'", "SymValueStr")
+                                elif isinstance(v, bool): # Es importante poner bool antes que int en Python
+                                    self.output_area.insert(tk.END, str(v), "SymValueBool")
+                                elif isinstance(v, (int, float)):
+                                    self.output_area.insert(tk.END, str(v), "SymValueNum")
+                                else:
+                                    # Para listas y otras estructuras complejas
+                                    self.output_area.insert(tk.END, repr(v), "SymDict")
+                                
+                                # Coma separadora (excepto en el último elemento)
+                                if idx < len(items) - 1:
+                                    self.output_area.insert(tk.END, ", ", "SymPunct")
+                                    
+                            self.output_area.insert(tk.END, "}\n", "SymPunct")
+                        except Exception:
+                            # Si por alguna razón falla el parseo, se imprime blanco como antes
+                            self.output_area.insert(tk.END, f"{der}\n", "SymDict")
+                    else:
+                        self.output_area.insert(tk.END, f"{linea}\n", "ConsoleInfo")
 
         errores_totales = resultados["sintactico"] + resultados["semantico"]
         self.resaltar_errores(errores_totales)
 
         self.output_area.config(state='disabled')
         self.output_area.see(tk.END)
-
-    def mostrar_cuadruplos(self):
-        self.preparar_consola("CÓDIGO INTERMEDIO (CUÁDRUPLOS)")
-        # Obtenemos el código y ejecutamos el análisis
-        codigo_fuente = self.text_area.get('1.0', tk.END)
-        compilador = CompiladorProyecto(codigo_fuente)
-        compilador.analizar_todo() 
-        
-        cuadruplos = compilador.cuadruplos
-        
-        if cuadruplos:
-            # Mostramos cada cuádruplo con su índice
-            for i, cuad in enumerate(cuadruplos):
-                self.output_area.insert(tk.END, f"{i}: {cuad}\n")
-        else:
-            self.output_area.insert(tk.END, "No se generaron cuádruplos (revisa errores sintácticos).\n")
-            
-        self.finalizar_consola()
 
     def ejecutar_programa(self):
         self.preparar_consola("EJECUCIÓN DEL PROGRAMA (MÁQUINA VIRTUAL)")

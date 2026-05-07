@@ -1263,10 +1263,9 @@ class CompiladorProyecto:
 
             # Creamos un temporal para guardar el resultado de esta suma/resta
             temp = self.generar_temporal()
+            self.tipos_temporales[temp] = tipo_resultado
+
             self.emitir_cuadruplo(operador, resultado_izquierdo, resultado_derecho, temp)
-            
-            # El lado izquierdo ahora se convierte en el temporal que acabamos de crear
-            # (Para encadenar operaciones como A + B + C)
             resultado_izquierdo = temp
 
         # Devolvemos la variable o temporal que tiene el resultado final
@@ -1292,6 +1291,8 @@ class CompiladorProyecto:
                 tipo_resultado = "Unknown" # Modo pánico para no crashear
 
             temp = self.generar_temporal()
+            self.tipos_temporales[temp] = tipo_resultado
+
             self.emitir_cuadruplo(operador, resultado_izquierdo, resultado_derecho, temp)
             resultado_izquierdo = temp
 
@@ -1452,6 +1453,8 @@ class CompiladorProyecto:
 
             # Generamos el temporal booleano
             temp = self.generar_temporal()
+            self.tipos_temporales[temp] = tipo_resultado
+
             self.emitir_cuadruplo(operador, resultado_izquierdo, resultado_derecho, temp)
             resultado_izquierdo = temp
 
@@ -1486,6 +1489,8 @@ class CompiladorProyecto:
 
             # Generamos el temporal booleano
             temp = self.generar_temporal()
+            self.tipos_temporales[temp] = tipo_resultado
+            
             self.emitir_cuadruplo(operador, resultado_izquierdo, resultado_derecho, temp)
             resultado_izquierdo = temp
 
