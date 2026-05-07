@@ -1,2 +1,6 @@
 __pycache__/
 script test/
+# PyInstaller
+/build/
+/dist/
+*.spec
