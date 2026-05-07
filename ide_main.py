@@ -2,6 +2,19 @@ import tkinter as tk
 from tkinter import messagebox, filedialog
 import re
 from compiler_engine import CompiladorProyecto
+import sys
+from virtual_machine import VirtualMachine
+
+class ConsolaRedirigida:
+    def __init__(self, text_widget):
+        self.text_widget = text_widget
+        
+    def write(self, mensaje):
+        self.text_widget.insert(tk.END, mensaje)
+        self.text_widget.see(tk.END)
+        
+    def flush(self):
+        pass
 
 class IDEVisualBasic:
     def __init__(self, root):
@@ -54,6 +67,7 @@ class IDEVisualBasic:
         self.text_area.tag_configure("String", foreground="#a5d6a7")                                  # Verde claro
         self.text_area.tag_configure("Boolean", foreground="#ffcc80", font=("Consolas", 12, "italic"))# Naranja claro (Cursiva)
         self.text_area.tag_configure("ErrorLine", background="#7f0000")
+        self.text_area.tag_configure("Comment", foreground="#9e9e9e", font=("Consolas", 12, "italic")) # Color Gris
 
         # Bindings para actualizar números
         self.text_area.bind('<KeyRelease>', self.actualizar_numeros_linea)
@@ -108,33 +122,38 @@ class IDEVisualBasic:
     
     def resaltar_sintaxis(self):
         # 1. Limpiamos los colores actuales
-        for tag in ["Keyword", "Type", "Number", "String", "Boolean", "ErrorLine"]:
+        for tag in ["Keyword", "Type", "Number", "String", "Boolean", "ErrorLine", "Comment"]:
             self.text_area.tag_remove(tag, "1.0", tk.END)
 
-        # 2. STRINGS PRIMERO (Fundamental para que las excepciones funcionen)
+        # 2. STRINGS Y CHARS
+        # Regex estricto para Chars: solo admite exactamente 1 carácter entre comillas simples
+        self.aplicar_tag_color(r"'[^']'", "String") 
         self.aplicar_tag_color(r"\"[^\"]*\"", "String")
-        self.aplicar_tag_color(r"'[^']*'", "String") 
 
-        # 3. Palabras Clave
+        # 3. COMENTARIOS
+        self.aplicar_tag_color(r"'.*", "Comment", ignorar_tags=["String"])
+
+        # 4. Palabras Clave
         keywords = ["Imports", "Module", "Sub", "Main", "End", 
                     "Dim", "As", "Print", "If", "Then", "Select", 
                     "Case", "Is", "To", "Else", "For", "Next",
                     "Step", "While", "Function", "Return"]
         
+        # ¡ESTE ES EL BUCLE QUE FALTABA!
         for word in keywords:
-            self.aplicar_tag_color(f"\\m{word}\\M", "Keyword", ignorar_tags=["String"])
+            self.aplicar_tag_color(f"\\m{word}\\M", "Keyword", ignorar_tags=["String", "Comment"])
 
-        # 4. Tipos de Datos
+        # 5. Tipos de Datos
         tipos = ["Integer", "Double", "String", "Boolean", "Char"]
         for tipo in tipos:
-            self.aplicar_tag_color(f"\\m{tipo}\\M", "Type", ignorar_tags=["String"])
+            self.aplicar_tag_color(f"\\m{tipo}\\M", "Type", ignorar_tags=["String", "Comment"])
 
-        # 5. Valores Booleanos
+        # 6. Valores Booleanos
         for booleano in ["True", "False"]:
-            self.aplicar_tag_color(f"\\m{booleano}\\M", "Boolean", ignorar_tags=["String"])
+            self.aplicar_tag_color(f"\\m{booleano}\\M", "Boolean", ignorar_tags=["String", "Comment"])
 
-        # 6. Números
-        self.aplicar_tag_color(r"\m\d+\M", "Number", ignorar_tags=["String"])
+        # 7. Números
+        self.aplicar_tag_color(r"\m\d+\M", "Number", ignorar_tags=["String", "Comment"])
 
     def aplicar_tag_color(self, patron, tag, ignorar_tags=None):
         """Busca un patrón Regex en el texto y le aplica el Tag correspondiente"""
@@ -283,7 +302,7 @@ class IDEVisualBasic:
         ejecutar_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Ejecutar", menu=ejecutar_menu)
         ejecutar_menu.add_command(label="Iniciar Depuración", command=lambda: self.log_salida("Iniciando depuración..."))
-        ejecutar_menu.add_command(label="Ejecutar sin Depuración (Ctrl+F5)", command=lambda: self.log_salida("Ejecutando programa..."))
+        ejecutar_menu.add_command(label="Ejecutar sin Depuración (Ctrl+F5)", command=self.ejecutar_programa)
         ejecutar_menu.add_separator()
         ejecutar_menu.add_command(label="Detener Ejecución", command=lambda: self.log_salida("Ejecución detenida."))
 
@@ -491,6 +510,36 @@ class IDEVisualBasic:
             self.output_area.insert(tk.END, "No se generaron cuádruplos (revisa errores sintácticos).\n")
             
         self.finalizar_consola()
+
+    def ejecutar_programa(self):
+        self.preparar_consola("EJECUCIÓN DEL PROGRAMA (MÁQUINA VIRTUAL)")
+        
+        # 1. Compilamos el código
+        codigo_fuente = self.text_area.get('1.0', tk.END)
+        compilador = CompiladorProyecto(codigo_fuente)
+        compilador.analizar_todo()
+        
+        # 2. Verificamos que no haya errores semánticos o de sintaxis
+        errores = compilador.filtrar_warnings(["missing", "unexpected", "type", "undefine", "mismatch"], auto_analizar=False)
+        if errores:
+            self.output_area.insert(tk.END, "\n[ERROR] No se puede ejecutar el programa. Corrige los errores de compilación primero.\n")
+            self.finalizar_consola()
+            return
+
+        # 3. Redirigimos la salida de consola (prints) hacia nuestra caja de texto
+        stdout_original = sys.stdout
+        sys.stdout = ConsolaRedirigida(self.output_area)
+        
+        try:
+            # 4. ¡Instanciamos y encendemos el procesador virtual!
+            vm = VirtualMachine(compilador.cuadruplos, compilador.tabla)
+            vm.ejecutar()
+        except Exception as e:
+            print(f"\nExcepción crítica del sistema: {e}")
+        finally:
+            # 5. Restauramos la consola original para no romper Python
+            sys.stdout = stdout_original
+            self.finalizar_consola()
 
     def mostrar_info_acerca_de(self):
         info = (

@@ -162,19 +162,33 @@ class Lexico:
             else:
                 return Token(TokenType.UNCLOSED_STRING, cadena, self.linea)
 
-        # Manejo de Chars
+        # Manejo Híbrido de Chars vs Comentarios
         if char == "'":
             self.pos += 1
-            caracter = ""
-            while self.pos < len(self.fuente) and self.fuente[self.pos] not in ["'", '\n']:
-                caracter += self.fuente[self.pos]
-                self.pos += 1
             
+            # Lookahead: Miramos 1 o 2 espacios adelante para ver si se cierra rápido
+            es_char = False
             if self.pos < len(self.fuente) and self.fuente[self.pos] == "'":
-                self.pos += 1
+                es_char = True
+            elif self.pos + 1 < len(self.fuente) and self.fuente[self.pos+1] == "'":
+                es_char = True
+            elif self.pos + 2 < len(self.fuente) and self.fuente[self.pos+2] == "'":
+                es_char = True
+
+            if es_char:
+                # Es un Char (ej: 'p' o '\n')
+                caracter = ""
+                while self.pos < len(self.fuente) and self.fuente[self.pos] != "'":
+                    caracter += self.fuente[self.pos]
+                    self.pos += 1
+                self.pos += 1 # Consumir la comilla de cierre
                 return Token(TokenType.CHAR_LITERAL, caracter, self.linea)
             else:
-                return Token(TokenType.UNCLOSED_CHAR, caracter, self.linea)
+                # Es un comentario. Ignoramos todo el texto hasta que se acabe la línea.
+                while self.pos < len(self.fuente) and self.fuente[self.pos] != '\n':
+                    self.pos += 1
+                # Hacemos una llamada recursiva para devolver el token de la siguiente línea
+                return self.siguiente_token()
 
         # Manejo de identificadores
         if char.isalpha():
@@ -318,6 +332,7 @@ class CompiladorProyecto:
         self.pila_saltos = []
         self.pila_inicios_while = []
         self.tipos_temporales = {}
+        self.funcion_actual = None
 
         self.rutas_analisis = {
             TokenType.IMPORTS: self._analizar_imports,
@@ -722,6 +737,7 @@ class CompiladorProyecto:
                 if self.pila_estructuras_abiertas:
                     self.pila_estructuras_abiertas.pop()
                 self.en_sub = False
+                self.funcion_actual = None
                 self.tabla.salir_ambito()
                 # Emitimos el marcador de fin de función
                 self.emitir_cuadruplo('ENDFUNC', '', '', '')
@@ -771,11 +787,16 @@ class CompiladorProyecto:
                     self.registrar_warning(f"Warning ambiguity '{tipo_var_str[:3].lower()}' to '{tipo_previo[:3].lower()}'")
                 
                 if self.token_actual.type == TokenType.IGUAL:
-                    # Validar semánticamente que no se asigne valor directo a un arreglo entero en su Dim
                     if tamano_arreglo is not None:
                         self.registrar_warning("Warning cannot assign direct value to array during declaration")
-                    self.consumir()
-                    self.saltar_expresion()
+                        self.consumir()
+                        self.saltar_expresion()
+                    else:
+                        self.consumir() # Consumimos el '='
+                        
+                        # --- Extraemos el valor y generamos el cuádruplo ---
+                        valor_inicial = self.analizar_expresion_logica()
+                        self.emitir_cuadruplo('=', valor_inicial, '', nombre_var)
         else:
             self.saltar_expresion()
 
@@ -842,24 +863,26 @@ class CompiladorProyecto:
             self.saltar_expresion(tipo_esperado=None)
 
     def _analizar_print(self):
-        self.consumir()
+        self.consumir() # Consumimos 'Print'
         if self.token_actual.type == TokenType.PAREN_A:
             self.consumir()
-            if self.token_actual.type == TokenType.IDENTIFICADOR:
-                if not self.tabla.existe(self.token_actual.value):
-                    self.registrar_warning(f"Warning undefine type '{self.token_actual.value}'")
-            self.consumir() 
+            
+            # --- NUEVO: Parseamos cualquier cosa (String, Variable, Arreglo, Matemática) ---
+            valor_a_imprimir = self.analizar_expresion_logica()
+            
             if self.token_actual.type == TokenType.PAREN_C:
                 self.consumir() 
             else:
-                self.registrar_warning("Warning missing ')'")
+                self.registrar_warning("Warning missing ')' in Print")
             
-            if self.token_actual.type != TokenType.PUNTO_COMA:
-                self.registrar_warning("Warning end intruction 'print' ';'")
-            else:
+            # Opcional: Si tu lenguaje exige punto y coma al final de Print
+            if self.token_actual.type == TokenType.PUNTO_COMA:
                 self.consumir()
+                
+            # Emitimos el cuádruplo para la Máquina Virtual
+            self.emitir_cuadruplo('PRINT', valor_a_imprimir, '', '')
         else:
-            self.registrar_warning("Warning missing '('")
+            self.registrar_warning("Warning missing '(' after Print")
             self.saltar_expresion()
 
     def _analizar_for(self):
@@ -1093,11 +1116,11 @@ class CompiladorProyecto:
                     if self.token_actual.type == TokenType.AS:
                         self.consumir()
                         tipo_param = self.token_actual.value
-                        
+                        self.funcion_actual = nombre_funcion
                         # Guardamos el parámetro en la tabla local de la función
                         self.tabla.declarar(nom_param, tipo_param)
-                        # Añadimos el tipo a la "firma" de la función
-                        parametros.append(tipo_param)
+                        # Guardamos nombre y tipo
+                        parametros.append({"nombre": nom_param, "tipo": tipo_param})
                         
                         self.consumir() # Consumimos el tipo
                     else:
@@ -1145,10 +1168,8 @@ class CompiladorProyecto:
         # Parseamos lo que sea que vayamos a devolver
         valor_retorno = self.analizar_expresion_logica()
         
-        # Opcional: Aquí podrías validar semánticamente que el 'tipo' de valor_retorno 
-        # coincida con el 'tipo_retorno' de la función actual.
-        
-        self.emitir_cuadruplo('RETURN', valor_retorno, '', '')
+        # Emitimos el RETURN asociado al nombre de la función
+        self.emitir_cuadruplo('RETURN', valor_retorno, '', self.funcion_actual)
 
     def saltar_expresion(self, tipo_esperado=None, tokens_parada=None):
         
@@ -1306,9 +1327,14 @@ class CompiladorProyecto:
                                 
                                 # Validación semántica de los parámetros
                                 if k < len(info_func["parametros"]):
-                                    tipo_esperado = info_func["parametros"][k]
+                                    tipo_esperado = info_func["parametros"][k]["tipo"]
+                                    nombre_param = info_func["parametros"][k]["nombre"] # Extraemos el nombre real ('a')
+                                    
                                     if tipo_arg and tipo_arg != "Unknown" and tipo_esperado != tipo_arg:
                                         self.registrar_warning(f"Warning type mismatch: Argument {k+1} of '{valor_operando}' expects '{tipo_esperado}', got '{tipo_arg}'")
+                                        
+                                    # Emitimos el cuádruplo del parámetro con su nombre real!
+                                    self.emitir_cuadruplo('PARAM', arg_exp, '', nombre_param)
                                 else:
                                     self.registrar_warning(f"Warning too many arguments for function '{valor_operando}'")
                                 
@@ -1371,8 +1397,18 @@ class CompiladorProyecto:
             # Si no es función ni arreglo, es una variable normal
             return valor_operando
             
-        # Caso 2: Es una cadena o booleano (Ajustar según necesites)
-        elif t.type in [TokenType.CADENA_LITERAL, TokenType.BOOLEANO_LITERAL, TokenType.CHAR_LITERAL]:
+        # Caso 2: Es una cadena, booleano O CARÁCTER
+        elif t.type == TokenType.CADENA_LITERAL:
+            valor_operando = f'"{t.value}"'  # <-- Inyectamos las dobles comillas
+            self.consumir()
+            return valor_operando
+            
+        elif t.type == TokenType.CHAR_LITERAL:
+            valor_operando = f"'{t.value}'"  # <-- Inyectamos las comillas simples
+            self.consumir()
+            return valor_operando
+            
+        elif t.type == TokenType.BOOLEANO_LITERAL:
             valor_operando = t.value
             self.consumir()
             return valor_operando
