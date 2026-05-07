@@ -16,35 +16,8 @@ Module Program
         c = 'p'
         b = True
         variable = "hola soy un string"
-        
-        if x == 2 then
-        End if
-        
-        if (x == 2) then
-        End if
-        
-        if (x == 2 then
-        End if
-        
-        if x = 2 then
-        End if
-        
-        if == x 2 then
-        End if
-        
-        x = 2 if then
-        End if
-        
-        if x = 2
-        End if
-        
-        if x = 2 then
-        
-        if then
-        end if
-        
-        
-        
+
     End Sub
 End Module
+
 

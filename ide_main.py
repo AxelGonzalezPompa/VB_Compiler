@@ -294,6 +294,7 @@ class IDEVisualBasic:
         compiladores_menu.add_command(label="Análisis Léxico", command=self.ejecutar_lexico)
         compiladores_menu.add_command(label="Análisis Sintáctico", command=self.ejecutar_sintactico)
         compiladores_menu.add_command(label="Análisis Semántico", command=self.ejecutar_semantico)
+        compiladores_menu.add_command(label="Generar Cuádruplos", command=self.mostrar_cuadruplos)
         compiladores_menu.add_command(label="Generar Tabla de Símbolos", command=self.mostrar_tabla_simbolos)
         compiladores_menu.add_separator()
         compiladores_menu.add_command(label="Compilación Completa (F5)", command=self.ejecutar_compilador)
@@ -454,7 +455,15 @@ class IDEVisualBasic:
         if resultados["semantico"]:
             for res in resultados["semantico"]: self.output_area.insert(tk.END, f">> {res}\n")
         else: self.output_area.insert(tk.END, "Sin errores semánticos.\n")
-            
+        
+        # --- NUEVO: APARTADO DE CUÁDRUPLOS ---
+        self.output_area.insert(tk.END, "\n--- CÓDIGO INTERMEDIO (CUÁDRUPLOS) ---\n")
+        if "cuadruplos" in resultados and resultados["cuadruplos"]:
+            for i, cuad in enumerate(resultados["cuadruplos"]):
+                self.output_area.insert(tk.END, f"{i}: {cuad}\n")
+        else:
+            self.output_area.insert(tk.END, "Sin cuádruplos generados.\n")
+
         # --- TABLA DE SÍMBOLOS ---
         self.output_area.insert(tk.END, "\n--- TABLA DE SÍMBOLOS ---\n")
         self.output_area.insert(tk.END, "\n".join(resultados["tabla"]))
@@ -464,6 +473,24 @@ class IDEVisualBasic:
 
         self.output_area.config(state='disabled')
         self.output_area.see(tk.END)
+
+    def mostrar_cuadruplos(self):
+        self.preparar_consola("CÓDIGO INTERMEDIO (CUÁDRUPLOS)")
+        # Obtenemos el código y ejecutamos el análisis
+        codigo_fuente = self.text_area.get('1.0', tk.END)
+        compilador = CompiladorProyecto(codigo_fuente)
+        compilador.analizar_todo() 
+        
+        cuadruplos = compilador.cuadruplos
+        
+        if cuadruplos:
+            # Mostramos cada cuádruplo con su índice
+            for i, cuad in enumerate(cuadruplos):
+                self.output_area.insert(tk.END, f"{i}: {cuad}\n")
+        else:
+            self.output_area.insert(tk.END, "No se generaron cuádruplos (revisa errores sintácticos).\n")
+            
+        self.finalizar_consola()
 
     def mostrar_info_acerca_de(self):
         info = (

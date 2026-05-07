@@ -21,6 +21,8 @@ class TokenType(enum.Enum):
     NEXT = "Next"
     STEP = "Step"
     WHILE = "While"
+    AND = "And"
+    OR = "Or"
     
     TIPO_ENTERO = "Integer"
     TIPO_DOUBLE = "Double"
@@ -55,6 +57,7 @@ class TokenType(enum.Enum):
     FIN = "EOF"
     NUEVA_LINEA = "NewLine"
     INVALID_ID = "Invalid_ID"
+    SIMBOLO_DESCONOCIDO = "Simbolo_Desconocido"
 
 class Token:
     def __init__(self, type, value, linea):
@@ -93,7 +96,9 @@ class Lexico:
             "for": TokenType.FOR,
             "next": TokenType.NEXT,
             "step": TokenType.STEP,
-            "while": TokenType.WHILE
+            "while": TokenType.WHILE,
+            "and": TokenType.AND,
+            "or": TokenType.OR
         }
 
         self.op_dobles = {
@@ -276,6 +281,12 @@ class CompiladorProyecto:
         self.pila_whiles = []
         self.pila_estructuras_abiertas = []
 
+        self.cuadruplos = []
+        self.contador_temporales = 1
+        self.pila_saltos = []
+        self.pila_inicios_while = []
+        self.tipos_temporales = {}
+
         self.rutas_analisis = {
             TokenType.IMPORTS: self._analizar_imports,
             TokenType.MODULE: self._analizar_module,
@@ -290,8 +301,28 @@ class CompiladorProyecto:
             TokenType.PRINT: self._analizar_print,
             TokenType.FOR: self._analizar_for,
             TokenType.NEXT: self._analizar_next,
-            TokenType.WHILE: self._analizar_while
+            TokenType.WHILE: self._analizar_while,
+            TokenType.ELSE: self._analizar_else
         }
+
+    def generar_temporal(self):
+        nombre_temp = f"T{self.contador_temporales}"
+        self.contador_temporales += 1
+        return nombre_temp
+
+    def emitir_cuadruplo(self, operador, arg1, arg2, resultado):
+        self.cuadruplos.append((operador, arg1, arg2, resultado))
+
+    def rellenar_salto(self, indice_cuadruplo):
+        # El destino es el índice del próximo cuádruplo que se va a generar
+        destino = len(self.cuadruplos) 
+        
+        # Extraemos la tupla pendiente
+        cuad_antiguo = self.cuadruplos[indice_cuadruplo]
+        
+        # En Python las tuplas son inmutables, así que creamos una nueva
+        # reemplazando el último valor (el destino)
+        self.cuadruplos[indice_cuadruplo] = (cuad_antiguo[0], cuad_antiguo[1], cuad_antiguo[2], f"L{destino}")
 
     def consumir(self):
         token_consumido = self.token_actual
@@ -312,7 +343,8 @@ class CompiladorProyecto:
             "lexico": self.obtener_tokens_vertical(),
             "sintactico": self.filtrar_warnings(["missing", "unexpected", "expected", "instruction", "scope", "parenthesis", "unclosed", "incomplete"], auto_analizar=False),
             "semantico": self.filtrar_warnings(["type", "undefine", "ambiguity", "variable", "invalid", "mismatch"], auto_analizar=False),
-            "tabla": self.obtener_formato_tabla()
+            "tabla": self.obtener_formato_tabla(),
+            "cuadruplos": self.cuadruplos
         }
 
     def analizar_todo(self):
@@ -418,12 +450,18 @@ class CompiladorProyecto:
     def _analizar_if(self):
         linea_inicio_if = self.token_actual.linea
         self.consumir()
+        
         uso_parentesis = False
         if self.token_actual.type == TokenType.PAREN_A:
             uso_parentesis = True
             self.consumir()
         
-        self.analizar_condicion()
+        # 1. Evaluamos la condición completa y obtenemos el temporal (ej. T4)
+        resultado_condicion = self.analizar_expresion_logica()
+        
+        # 2. Emitimos el GOTOF con destino pendiente y guardamos su índice
+        self.emitir_cuadruplo('GOTOF', resultado_condicion, '', 'PENDIENTE')
+        self.pila_saltos.append(len(self.cuadruplos) - 1)
         
         if uso_parentesis:
             if self.token_actual.type == TokenType.PAREN_C:
@@ -438,7 +476,7 @@ class CompiladorProyecto:
             
         self.pila_ifs.append(linea_inicio_if)
         self.pila_estructuras_abiertas.append("If")
-        self.tabla.entrar_ambito() 
+        self.tabla.entrar_ambito()
 
     def _analizar_select(self):
         linea_inicio_select = self.token_actual.linea
@@ -585,6 +623,12 @@ class CompiladorProyecto:
                     self.pila_ifs.pop()
                     self.pila_estructuras_abiertas.pop() # Quitamos el If de la pila universal
                     self.tabla.salir_ambito()
+                
+                    # Rellenar el GOTOF
+                    if self.pila_saltos:
+                        indice_salto = self.pila_saltos.pop()
+                        self.rellenar_salto(indice_salto)
+
                 else:
                     self.registrar_warning("Warning unexpected 'End If'")
         
@@ -614,6 +658,18 @@ class CompiladorProyecto:
                     self.pila_whiles.pop()
                     self.pila_estructuras_abiertas.pop() # Quitamos el While de la pila universal
                     self.tabla.salir_ambito()
+
+                    # --- Lógica de Saltos del While ---
+                    # 1. Emitir el GOTO incondicional para regresar al inicio
+                    if self.pila_inicios_while:
+                        indice_regreso = self.pila_inicios_while.pop()
+                        self.emitir_cuadruplo('GOTO', '', '', f"L{indice_regreso}")
+                        
+                    # 2. Rellenar el GOTOF pendiente que sacaba del ciclo
+                    if self.pila_saltos:
+                        indice_salto_falso = self.pila_saltos.pop()
+                        self.rellenar_salto(indice_salto_falso)
+                
                 else:
                     self.registrar_warning("Warning unexpected 'End While'")
         
@@ -660,12 +716,32 @@ class CompiladorProyecto:
     def _analizar_identificador(self):
         nombre_var = self.token_actual.value
         self.consumir()
+        
+        # 1. Obtenemos qué tipo de dato debería ser esta variable
         tipo_esperado = self.tabla.obtener_tipo(nombre_var)
+        
         if not self.tabla.existe(nombre_var):
             self.registrar_warning(f"Warning undefine type '{nombre_var}'")
+            
         if self.token_actual.type == TokenType.IGUAL:
-            self.consumir()
-            self.saltar_expresion(tipo_esperado=tipo_esperado)
+            self.consumir() # Consumir el '='
+            
+            # 2. Procesamos toda la expresión a la derecha del igual
+            resultado_expresion = self.analizar_expresion_logica()
+            
+            # --- VALIDACIÓN DE ASIGNACIÓN ---
+            if tipo_esperado: # Solo validamos si la variable sí existía
+                tipo_resultado = self._inferir_tipo(resultado_expresion)
+                
+                # Validamos que los tipos coincidan
+                if tipo_resultado and tipo_resultado != "Unknown" and tipo_esperado != tipo_resultado:
+                    
+                    # Excepción: Permitimos guardar un Integer en un Double (Casteo implícito)
+                    if not (tipo_esperado == 'Double' and tipo_resultado == 'Integer'):
+                        self.registrar_warning(f"Warning type mismatch: Cannot assign '{tipo_resultado}' to '{tipo_esperado}' variable '{nombre_var}'")
+            
+            # 3. Emitimos el cuádruplo final de asignación
+            self.emitir_cuadruplo('=', resultado_expresion, '', nombre_var)
 
     def _analizar_invalid_id(self):
         self.registrar_warning(f"Warning undefined varible '{self.token_actual.value}'")
@@ -715,23 +791,48 @@ class CompiladorProyecto:
                 if not self.tabla.existe(nombre_var):
                     self.registrar_warning(f"Warning undefine type '{nombre_var}'")
 
+            # --- INYECCIÓN 1: La Asignación Inicial ---
             if self.token_actual.type == TokenType.IGUAL:
                 self.consumir()
-                self.saltar_expresion(tokens_parada=[TokenType.TO, TokenType.NUEVA_LINEA, TokenType.FIN])
+                # Parseamos lo que va antes del 'To'
+                valor_inicio = self.analizar_expresion_logica()
+                self.emitir_cuadruplo('=', valor_inicio, '', nombre_var)
             else:
                 self.registrar_warning("Warning expected '=' after loop variable")
 
+            # Marcamos a qué cuádruplo debe regresar el Next
+            indice_inicio_condicion = len(self.cuadruplos)
+
+            # --- INYECCIÓN 2: La Condición Límite ---
             if self.token_actual.type == TokenType.TO:
                 self.consumir()
-                self.saltar_expresion(tokens_parada=[TokenType.STEP, TokenType.NUEVA_LINEA, TokenType.FIN])
+                valor_fin = self.analizar_expresion_logica()
+                
+                # Creamos la condición: x <= limite
+                temp_cond = self.generar_temporal()
+                self.emitir_cuadruplo('<=', nombre_var, valor_fin, temp_cond)
+
+                # Emitimos el GOTOF para salir del ciclo
+                self.emitir_cuadruplo('GOTOF', temp_cond, '', 'PENDIENTE')
+                indice_gotof = len(self.cuadruplos) - 1
             else:
                 self.registrar_warning("Warning expected 'To' in 'For' statement")
+                indice_gotof = None
 
+            # Detectar el Step (Si no hay, por defecto es 1)
+            valor_step = '1'
             if self.token_actual.type == TokenType.STEP:
                 self.consumir()
-                self.saltar_expresion()
+                valor_step = self.analizar_expresion_logica()
 
-            self.pila_fors.append(linea_inicio_for)
+            self.pila_fors.append({
+                "linea": linea_inicio_for,
+                "var": nombre_var,
+                "step": valor_step,
+                "inicio_cond": indice_inicio_condicion,
+                "salto_falso": indice_gotof
+            })
+
             self.pila_estructuras_abiertas.append("For")
             self.tabla.entrar_ambito()
         else:
@@ -748,14 +849,30 @@ class CompiladorProyecto:
                 self.registrar_warning(f"Warning undefine type '{self.token_actual.value}'")
             self.consumir()
 
-        # Validación de anidamiento cruzado
         if estructura_top and estructura_top != "For":
-            self.registrar_warning(f"Warning scope error: Cannot use 'Next', currently inside an unclosed '{estructura_top}' block")
+                self.registrar_warning(f"Warning scope error: Cannot use 'Next', currently inside an unclosed '{estructura_top}' block")
         else:
             if len(self.pila_fors) > 0:
-                self.pila_fors.pop()
-                self.pila_estructuras_abiertas.pop() # Quitamos el For de la pila universal
+                info_for = self.pila_fors.pop()
+                self.pila_estructuras_abiertas.pop()
                 self.tabla.salir_ambito()
+                
+                # --- INYECCIÓN 3: El Incremento y el Salto ---
+                nombre_var = info_for["var"]
+                valor_step = info_for["step"]
+                
+                # 1. Sumamos el step a la variable: x = x + step
+                temp_suma = self.generar_temporal()
+                self.emitir_cuadruplo('+', nombre_var, valor_step, temp_suma)
+                self.emitir_cuadruplo('=', temp_suma, '', nombre_var)
+                
+                # 2. Regresamos al inicio (donde se evalúa la condición <=)
+                self.emitir_cuadruplo('GOTO', '', '', f"L{info_for['inicio_cond']}")
+                
+                # 3. Rellenamos el GOTOF que se generó en el 'For'
+                if info_for["salto_falso"] is not None:
+                    self.rellenar_salto(info_for["salto_falso"])
+
             else:
                 self.registrar_warning("Warning unexpected 'Next'")
 
@@ -763,14 +880,22 @@ class CompiladorProyecto:
         linea_inicio_while = self.token_actual.linea
         self.consumir() # Consumimos la palabra 'While'
 
-        # Opcional: Permitir paréntesis estilo While (x < 10) o While x < 10
+        # 1: Guardamos en qué cuádruplo empieza la condición
+        # Así sabremos a dónde debe regresar el GOTO incondicional
+        indice_inicio_condicion = len(self.cuadruplos)
+        self.pila_inicios_while.append(indice_inicio_condicion)
+
         uso_parentesis = False
         if self.token_actual.type == TokenType.PAREN_A:
             uso_parentesis = True
             self.consumir()
         
-        # Reciclamos tu evaluador de condiciones
-        self.analizar_condicion()
+        # 2: Usamos el Descenso Recursivo igual que en el If
+        resultado_condicion = self.analizar_expresion_logica()
+        
+        # Emitimos el GOTOF para salir del ciclo si la condición es falsa
+        self.emitir_cuadruplo('GOTOF', resultado_condicion, '', 'PENDIENTE')
+        self.pila_saltos.append(len(self.cuadruplos) - 1)
         
         if uso_parentesis:
             if self.token_actual.type == TokenType.PAREN_C:
@@ -782,6 +907,74 @@ class CompiladorProyecto:
         self.pila_whiles.append(linea_inicio_while)
         self.pila_estructuras_abiertas.append("While")
         self.tabla.entrar_ambito()
+
+    def _analizar_else(self):
+        self.consumir() # Consumimos la palabra 'Else'
+        
+        # Validamos que realmente estemos dentro de un 'If'
+        estructura_top = self.pila_estructuras_abiertas[-1] if self.pila_estructuras_abiertas else None
+        if estructura_top != "If":
+            self.registrar_warning("Warning unexpected 'Else' outside of an 'If' block")
+            return
+            
+        # 1. Emitimos un GOTO para que el código 'True' brinque el bloque 'False'
+        self.emitir_cuadruplo('GOTO', '', '', 'PENDIENTE')
+        indice_goto = len(self.cuadruplos) - 1
+        
+        # 2. Sacamos de la pila el GOTOF que dejó el 'If' y lo rellenamos 
+        #    para que aterrice exactamente aquí (inicio del Else).
+        if self.pila_saltos:
+            indice_gotof = self.pila_saltos.pop()
+            self.rellenar_salto(indice_gotof)
+            
+        # 3. Metemos nuestro nuevo GOTO a la pila para que 'End If' lo rellene al final
+        self.pila_saltos.append(indice_goto)
+
+    def _inferir_tipo(self, operando):
+        op_str = str(operando)
+        
+        # 1. ¿Es un temporal que ya calculamos?
+        if op_str in self.tipos_temporales:
+            return self.tipos_temporales[op_str]
+            
+        # 2. ¿Es una variable declarada?
+        tipo_var = self.tabla.obtener_tipo(op_str)
+        if tipo_var:
+            return tipo_var
+            
+        # 3. Es un literal (constante)
+        if op_str in ['True', 'False']: return 'Boolean'
+        if op_str.startswith('"'): return 'String'
+        if op_str.startswith("'"): return 'Char'
+        if op_str.replace('.', '', 1).isdigit(): 
+            return 'Double' if '.' in op_str else 'Integer'
+            
+        return None
+
+    def _consultar_cubo_semantico(self, tipo_izq, operador, tipo_der):
+        if not tipo_izq or not tipo_der: return "ERROR"
+
+        # Aritmética (+, -, *, /)
+        if operador in ['+', '-', '*', '/']:
+            if tipo_izq == 'Integer' and tipo_der == 'Integer': return 'Integer'
+            # Si hay un Double, el resultado se promueve a Double
+            if tipo_izq in ['Integer', 'Double'] and tipo_der in ['Integer', 'Double']: return 'Double'
+            # Concatenación de strings
+            if operador == '+' and tipo_izq == 'String' and tipo_der == 'String': return 'String'
+            return "ERROR"
+
+        # Relacionales (>, <, >=, <=, =, <>)
+        if operador in ['>', '<', '>=', '<=', '=', '<>']:
+            if tipo_izq in ['Integer', 'Double'] and tipo_der in ['Integer', 'Double']: return 'Boolean'
+            if tipo_izq == tipo_der: return 'Boolean' # String=String, Char=Char, etc.
+            return "ERROR"
+
+        # Lógicos (And, Or)
+        if operador in ['And', 'Or']:
+            if tipo_izq == 'Boolean' and tipo_der == 'Boolean': return 'Boolean'
+            return "ERROR"
+
+        return "ERROR"
 
     def saltar_expresion(self, tipo_esperado=None, tokens_parada=None):
         
@@ -853,51 +1046,155 @@ class CompiladorProyecto:
             self.registrar_warning("Warning missing ')'")
         pass
 
-    def analizar_condicion(self):
-        operandos_validos = [TokenType.IDENTIFICADOR, TokenType.NUMERO, TokenType.CADENA_LITERAL, TokenType.BOOLEANO_LITERAL]
-        operadores_relacionales = [TokenType.IGUAL_LOGICO, TokenType.IGUAL, TokenType.MAYOR, TokenType.MENOR, 
-                                   TokenType.MAYOR_IGUAL, TokenType.MENOR_IGUAL, TokenType.DIFERENTE]
+    def analizar_expresion(self):
+        # 1. Parseamos el primer bloque (que podría ser una multiplicación/división o solo un número)
+        resultado_izquierdo = self.analizar_termino()
+
+        # 2. Si encontramos + o -, iteramos
+        while self.token_actual.type in [TokenType.SUMA, TokenType.RESTA]:
+            operador = self.token_actual.value
+            self.consumir() # Consumimos el símbolo (+ o -)
+            
+            # Parseamos el bloque de la derecha
+            resultado_derecho = self.analizar_termino()
+            
+            tipo_izq = self._inferir_tipo(resultado_izquierdo)
+            tipo_der = self._inferir_tipo(resultado_derecho)
+            tipo_resultado = self._consultar_cubo_semantico(tipo_izq, operador, tipo_der)
+            
+            if tipo_resultado == "ERROR":
+                self.registrar_warning(f"Warning type mismatch: Cannot perform '{operador}' between '{tipo_izq}' and '{tipo_der}'")
+                tipo_resultado = "Unknown" # Modo pánico para no crashear
+
+            # Creamos un temporal para guardar el resultado de esta suma/resta
+            temp = self.generar_temporal()
+            self.emitir_cuadruplo(operador, resultado_izquierdo, resultado_derecho, temp)
+            
+            # El lado izquierdo ahora se convierte en el temporal que acabamos de crear
+            # (Para encadenar operaciones como A + B + C)
+            resultado_izquierdo = temp
+
+        # Devolvemos la variable o temporal que tiene el resultado final
+        return resultado_izquierdo
+
+    def analizar_termino(self):
+        # Pedimos un factor (número, variable o paréntesis)
+        resultado_izquierdo = self.analizar_factor()
+
+        # Si encontramos * o /, iteramos
+        while self.token_actual.type in [TokenType.MULT, TokenType.DIV]:
+            operador = self.token_actual.value
+            self.consumir()
+            
+            resultado_derecho = self.analizar_factor()
+            
+            tipo_izq = self._inferir_tipo(resultado_izquierdo)
+            tipo_der = self._inferir_tipo(resultado_derecho)
+            tipo_resultado = self._consultar_cubo_semantico(tipo_izq, operador, tipo_der)
+            
+            if tipo_resultado == "ERROR":
+                self.registrar_warning(f"Warning type mismatch: Cannot perform '{operador}' between '{tipo_izq}' and '{tipo_der}'")
+                tipo_resultado = "Unknown" # Modo pánico para no crashear
+
+            temp = self.generar_temporal()
+            self.emitir_cuadruplo(operador, resultado_izquierdo, resultado_derecho, temp)
+            resultado_izquierdo = temp
+
+        return resultado_izquierdo
+
+    def analizar_factor(self):
+        t = self.token_actual
         
-        # --- NUEVA DETECCIÓN PARA EL CASO 2: Operador al inicio ---
-        if self.token_actual.type in operadores_relacionales:
-            self.registrar_warning(f"Warning invalid condition order: unexpected operator '{self.token_actual.value}' at the start")
+        # Caso 1: Es un número o una variable
+        if t.type in [TokenType.NUMERO, TokenType.IDENTIFICADOR]:
+            # Aquí también podrías llamar a self.tabla.existe() para validación semántica
+            valor_operando = t.value 
+            self.consumir()
+            return valor_operando
             
-            # MODO PÁNICO: Consumimos la "basura" hasta encontrar el 'Then' o el final de línea
-            # para que el compilador pueda seguir analizando el resto del código sin tropezarse.
-            while self.token_actual.type not in [TokenType.THEN, TokenType.PAREN_C, TokenType.NUEVA_LINEA, TokenType.FIN]:
+        # Caso 2: Es una cadena o booleano (Ajustar según necesites)
+        elif t.type in [TokenType.CADENA_LITERAL, TokenType.BOOLEANO_LITERAL, TokenType.CHAR_LITERAL]:
+            valor_operando = t.value
+            self.consumir()
+            return valor_operando
+
+        # Caso 3: Es un paréntesis abierto '('
+        elif t.type == TokenType.PAREN_A:
+            self.consumir()
+            # Llamamos de vuelta a la expresión completa
+            valor = self.analizar_expresion_logica()
+            
+            if self.token_actual.type == TokenType.PAREN_C:
                 self.consumir()
-            return
-            
-        # Validar primer operando (Flujo normal)
-        if self.token_actual.type not in operandos_validos:
-            self.registrar_warning("Warning missing variable or constant in condition")
-            # Modo pánico por si escriben basura en lugar de una variable
-            while self.token_actual.type not in [TokenType.THEN, TokenType.PAREN_C, TokenType.NUEVA_LINEA, TokenType.FIN]:
-                self.consumir()
-            return
-            
-        if self.token_actual.type == TokenType.IDENTIFICADOR:
-            if not self.tabla.existe(self.token_actual.value):
-                self.registrar_warning(f"Warning undefine type '{self.token_actual.value}'")
-        self.consumir() # Consumimos la variable
-        
-        # Validar operador relacional
-        if self.token_actual.type in operadores_relacionales:
-            self.consumir() # Consumimos el operador (ej. ==)
-            
-            # Validar segundo operando
-            if self.token_actual.type not in operandos_validos:
-                self.registrar_warning("Warning invalid or missing operand in condition")
-                # Modo pánico si falta el operando final
-                while self.token_actual.type not in [TokenType.THEN, TokenType.PAREN_C, TokenType.NUEVA_LINEA, TokenType.FIN]:
-                    self.consumir()
             else:
-                if self.token_actual.type == TokenType.IDENTIFICADOR:
-                    if not self.tabla.existe(self.token_actual.value):
-                        self.registrar_warning(f"Warning undefine type '{self.token_actual.value}'")
-                self.consumir() # Consumimos el segundo operando
+                self.registrar_warning("Warning missing ')' in expression")
+            return valor
+            
         else:
-            self.registrar_warning("Warning missing relational operator in condition")
-            # Modo pánico
-            while self.token_actual.type not in [TokenType.THEN, TokenType.PAREN_C, TokenType.NUEVA_LINEA, TokenType.FIN]:
-                self.consumir()
+            self.registrar_warning(f"Warning unexpected token '{t.value}' in expression")
+            self.consumir() # Evitar bucles infinitos en modo pánico
+            return "ERROR"
+    
+    def analizar_expresion_logica(self):
+        # Primero bajamos al nivel relacional
+        resultado_izquierdo = self.analizar_expresion_relacional()
+
+        # Si encontramos un And o un Or, lo procesamos
+        while self.token_actual.type in [TokenType.AND, TokenType.OR]:
+            operador = self.token_actual.value
+            self.consumir()
+            
+            # Buscamos el lado derecho de la comparación
+            resultado_derecho = self.analizar_expresion_relacional()
+
+            tipo_izq = self._inferir_tipo(resultado_izquierdo)
+            tipo_der = self._inferir_tipo(resultado_derecho)
+            tipo_resultado = self._consultar_cubo_semantico(tipo_izq, operador, tipo_der)
+            
+            if tipo_resultado == "ERROR":
+                self.registrar_warning(f"Warning type mismatch: Cannot perform '{operador}' between '{tipo_izq}' and '{tipo_der}'")
+                tipo_resultado = "Unknown" # Modo pánico para no crashear
+
+            # Generamos el temporal booleano
+            temp = self.generar_temporal()
+            self.emitir_cuadruplo(operador, resultado_izquierdo, resultado_derecho, temp)
+            resultado_izquierdo = temp
+
+        return resultado_izquierdo
+
+    def analizar_expresion_relacional(self):
+        # Bajamos a las matemáticas normales (+, -)
+        resultado_izquierdo = self.analizar_expresion()
+
+        operadores_relacionales = [
+            TokenType.MAYOR, TokenType.MENOR, TokenType.MAYOR_IGUAL, 
+            TokenType.MENOR_IGUAL, TokenType.IGUAL, TokenType.DIFERENTE, 
+            TokenType.IGUAL_LOGICO
+        ]
+
+        # A diferencia de la suma, en VB rara vez haces "A > B > C" seguidos,
+        # así que usamos un 'if' en lugar de un 'while'
+        if self.token_actual.type in operadores_relacionales:
+            operador = self.token_actual.value
+            self.consumir()
+            
+            # Buscamos la otra matemática a comparar
+            resultado_derecho = self.analizar_expresion()
+
+            tipo_izq = self._inferir_tipo(resultado_izquierdo)
+            tipo_der = self._inferir_tipo(resultado_derecho)
+            tipo_resultado = self._consultar_cubo_semantico(tipo_izq, operador, tipo_der)
+            
+            if tipo_resultado == "ERROR":
+                self.registrar_warning(f"Warning type mismatch: Cannot perform '{operador}' between '{tipo_izq}' and '{tipo_der}'")
+                tipo_resultado = "Unknown" # Modo pánico para no crashear
+
+            # Generamos el temporal booleano
+            temp = self.generar_temporal()
+            self.emitir_cuadruplo(operador, resultado_izquierdo, resultado_derecho, temp)
+            resultado_izquierdo = temp
+
+        return resultado_izquierdo
+
+    def analizar_condicion(self):
+        resultado_condicion = self.analizar_expresion_logica()
