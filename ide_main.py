@@ -32,7 +32,20 @@ class IDEVisualBasic:
         self.root = root
         self.root.title("IDE Visual Basic")
         self.root.geometry("900x650")
-        self.root.iconbitmap("icons/icon.ico")
+
+        import os
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        icon_path = os.path.join(script_dir, "icons", "icon.png")
+        try:
+            self.root.iconbitmap(icon_path)
+        except tk.TclError:
+            try:
+                self.root.iconphoto(True, tk.PhotoImage(file=icon_path))
+            except Exception as e:
+                print(e)
+        except Exception as e:
+            print(e)
+
         self.root.configure(bg="#00332a")
         self.ruta_archivo_actual = None
         self.timer_sintaxis = None
