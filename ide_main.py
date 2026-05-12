@@ -5,6 +5,7 @@ from compiler_engine import CompiladorProyecto
 import sys
 from virtual_machine import VirtualMachine
 import ast
+from assembly_generator import GeneradorEnsamblador
 
 class ConsolaRedirigida:
     def __init__(self, text_widget):
@@ -156,6 +157,15 @@ class IDEVisualBasic:
         self.output_area.tag_configure("SymValueStr", foreground="#a5d6a7")    # Verde para texto ('Integer')
         self.output_area.tag_configure("SymValueNum", foreground="#ffb74d")    # Naranja para números (1000)
         self.output_area.tag_configure("SymValueBool", foreground="#f48fb1", font=("Consolas", 11, "italic")) # Rosa cursiva para True/False
+
+        # Etiquetas avanzadas para Ensamblador
+        self.output_area.tag_configure("AsmComment", foreground="#9e9e9e", font=("Consolas", 11, "italic")) # Gris
+        self.output_area.tag_configure("AsmLabel", foreground="#ffd54f", font=("Consolas", 11, "bold"))     # Amarillo
+        self.output_area.tag_configure("AsmDirective", foreground="#ce93d8", font=("Consolas", 11, "bold")) # Morado
+        self.output_area.tag_configure("AsmInstruction", foreground="#81d4fa", font=("Consolas", 11, "bold")) # Azul Claro
+        self.output_area.tag_configure("AsmRegister", foreground="#ef9a9a")                                 # Rojo pastel
+        self.output_area.tag_configure("AsmNumber", foreground="#ffb74d")                                   # Naranja
+        self.output_area.tag_configure("AsmString", foreground="#a5d6a7")
 
         # Menus
         self.crear_menus()
@@ -409,6 +419,7 @@ class IDEVisualBasic:
         compiladores_menu.add_command(label="Análisis Semántico", command=self.ejecutar_semantico)
         compiladores_menu.add_command(label="Generar Cuádruplos", command=self.mostrar_cuadruplos)
         compiladores_menu.add_command(label="Generar Tabla de Símbolos", command=self.mostrar_tabla_simbolos)
+        compiladores_menu.add_command(label="Generar Ensamblador (.asm)", command=self.generar_ensamblador)
         compiladores_menu.add_separator()
         compiladores_menu.add_command(label="Compilación Completa (F5)", command=self.ejecutar_compilador)
 
@@ -812,25 +823,122 @@ class IDEVisualBasic:
             sys.stdout = stdout_original
             self.finalizar_consola()
 
+    def imprimir_ensamblador_coloreado(self, codigo_asm):
+        self.output_area.insert(tk.END, "\n--- CÓDIGO ENSAMBLADOR GENERADO ---\n", "ConsoleInfo")
+        
+        # Guardar la posición exacta donde empieza el código ensamblador
+        start_pos = self.output_area.index(tk.INSERT)
+        self.output_area.insert(tk.END, f"{codigo_asm}\n", "ConsoleNormal")
+        
+        # Función interna para pintar usando RegEx
+        def aplicar_tag(patron, tag, ignorar=None):
+            pos = start_pos
+            count_var = tk.StringVar()
+            while True:
+                # Búsqueda Case-Insensitive usando el motor de Tkinter
+                pos = self.output_area.search(patron, pos, stopindex=tk.END, count=count_var, regexp=True, nocase=True)
+                if not pos: break
+                
+                longitud = count_var.get()
+                if not longitud or int(longitud) == 0: break
+                fin_pos = f"{pos}+{longitud}c"
+                
+                # Respetar si la palabra ya está dentro de un comentario o un string
+                if ignorar:
+                    tags_actuales = self.output_area.tag_names(pos)
+                    if any(t in tags_actuales for t in ignorar):
+                        pos = fin_pos
+                        continue
+                        
+                self.output_area.tag_add(tag, pos, fin_pos)
+                pos = fin_pos
+
+        # 1. Comentarios y Strings (Se pintan primero para que sirvan de escudo)
+        aplicar_tag(r"'.*?'", "AsmString")
+        aplicar_tag(r'".*?"', "AsmString")
+        aplicar_tag(r";.*", "AsmComment")
+        
+        # 2. Etiquetas (Ej: L1: o MAIN PROC)
+        aplicar_tag(r"^[ \t]*[a-z0-9_]+:", "AsmLabel", ignorar=["AsmComment", "AsmString"])
+        
+        # 3. Directivas de Memoria y Secciones (\m y \M delimitan palabras enteras)
+        directivas_con_punto = [r"\.model", r"\.stack", r"\.data", r"\.code"]
+        for d in directivas_con_punto:
+            aplicar_tag(rf"{d}\M", "AsmDirective", ignorar=["AsmComment", "AsmString"])
+            
+        directivas_normales = ["proc", "endp", "end", "db", "dw", "dup"]
+        for d in directivas_normales:
+            aplicar_tag(rf"\m{d}\M", "AsmDirective", ignorar=["AsmComment", "AsmString"])
+            
+        # 4. Instrucciones del CPU
+        instrucciones = ["mov", "add", "sub", "cmp", "jmp", "je", "jne", "jg", "jl", "jle", "jge", 
+                         "call", "ret", "int", "push", "pop", "lea", "shl", "xor", "div", "idiv", 
+                         "imul", "cwd", "neg", "inc", "dec", "loop"]
+        for i in instrucciones:
+            aplicar_tag(rf"\m{i}\M", "AsmInstruction", ignorar=["AsmComment", "AsmString"])
+            
+        # 5. Registros de CPU
+        registros = ["ax", "bx", "cx", "dx", "ah", "al", "bh", "bl", "ch", "cl", "dh", "dl", 
+                     "ds", "cs", "ss", "es", "si", "di", "sp", "bp"]
+        for r in registros:
+            aplicar_tag(rf"\m{r}\M", "AsmRegister", ignorar=["AsmComment", "AsmString"])
+            
+        # 6. Números (Hexadecimales y Decimales, Ej: 10, 09h, 4Ch)
+        aplicar_tag(r"\m\d+[a-f0-9]*h?\M", "AsmNumber", ignorar=["AsmComment", "AsmString", "AsmLabel"])
+
+        self.output_area.insert(tk.END, "\n-----------------------------------\n", "ConsoleInfo")
+
+    def generar_ensamblador(self):
+        self.preparar_consola("GENERADOR DE ENSAMBLADOR x86")
+        codigo_fuente = self.text_area.get('1.0', tk.END)
+        compilador = CompiladorProyecto(codigo_fuente)
+        compilador.analizar_todo()
+        
+        errores = compilador.filtrar_warnings(["missing", "unexpected", "type", "undefine"], auto_analizar=False)
+        if errores:
+            self.output_area.insert(tk.END, "Corrige los errores antes de generar ensamblador.\n", "ConsoleError")
+            self.finalizar_consola()
+            return
+
+        # Instanciar el nuevo generador
+        generador = GeneradorEnsamblador(compilador.cuadruplos, compilador.tabla)
+        codigo_asm = generador.generar_x86()
+
+        self.imprimir_ensamblador_coloreado(codigo_asm)
+        
+        # Pedirle al usuario dónde guardar el .asm
+        file_path = filedialog.asksaveasfilename(defaultextension=".asm", filetypes=[("Archivos Ensamblador", "*.asm")])
+        if file_path:
+            with open(file_path, 'w') as file:
+                file.write(codigo_asm)
+            self.output_area.insert(tk.END, f"✓ Ensamblador guardado exitosamente en:\n{file_path}\n", "ConsoleSuccess")
+        else:
+            # Si el usuario cancela la ventana de guardado, le avisamos que de todos modos lo puede ver en consola
+            self.output_area.insert(tk.END, "⚠ Archivo no guardado (visible solo en consola).\n", "ConsoleInfo")
+        
+        self.finalizar_consola()
+
     def mostrar_info_acerca_de(self):
         info = (
             "IDE Visual Basic\n"
-            "Versión: v1.5\n\n"
+            "Versión: v2.0 (Edición Completa)\n\n"
             
-            "--- MOTOR DE COMPILACIÓN ---\n"
+            "--- MOTOR DE COMPILACIÓN (FRONTEND) ---\n"
             "• Análisis modular completo: Léxico, Sintáctico y Semántico.\n"
-            "• Tabla de Símbolos con direccionamiento de memoria (Base 1000).\n"
-            "• Soporte para estructura condicional nativa (If ... Then ... End If).\n"
-            "• Gestión avanzada de ámbitos (Scopes) mediante pilas.\n"
+            "• Tabla de Símbolos con direccionamiento y gestión dinámica de ámbitos.\n"
+            "• Generador de Código Intermedio optimizado (Cuádruplos).\n"
             "• Recuperación de errores en Modo Pánico para evitar fallos en cascada.\n\n"
+
+            "--- GENERACIÓN DE CÓDIGO (BACKEND) ---\n"
+            "• Traducción a Lenguaje Ensamblador nativo (Arquitectura x86 16-bits).\n"
+            "• Código objeto 100% compatible con el entorno MS-DOS (EMU8086).\n"
+            "• Asignación automática de memoria estática (.DATA) para arreglos.\n"
+            "• Inyección de librería estándar (Subrutinas I/O para consola).\n\n"
             
             "--- EXPERIENCIA DE USUARIO (UI/UX) ---\n"
-            "• Resaltado de Sintaxis en tiempo real (Keywords, Tipos, Strings, etc.).\n"
-            "• Resaltado visual de errores (fondo rojo) guiado por el compilador.\n"
-            "• Auto-indentación inteligente al presionar Enter.\n"
-            "• Borrado inteligente de tabulaciones (Backspace alineado a 4 espacios).\n"
-            "• Interfaz de paneles redimensionables (PanedWindow) para la consola.\n"
-            "• Flujo nativo de archivos: Abrir, Guardar y Guardar Como.\n\n"
+            "• Resaltado de Sintaxis dinámico (Editor Visual Basic y Salida ASM).\n"
+            "• Auto-indentación inteligente y borrado alineado a 4 espacios.\n"
+            "• Máquina Virtual integrada para depuración y pruebas rápidas.\n\n"
             
             "Desarrollado para la materia de Compiladores (CUCEI)\n"
             "Por: Axel González Pompa."
